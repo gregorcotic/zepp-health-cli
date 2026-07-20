@@ -116,6 +116,23 @@ python3 zepp_health.py events --preset readiness
 # Or any (eventType, subType) pair
 python3 zepp_health.py events --type Charge --subtype insight_data --days 7
 
+# Normalized Zepp Charge insight data
+python3 zepp_health.py insights --days 30
+python3 zepp_health.py insights --days 30 --json
+python3 zepp_health.py insights --days 30 --csv insights.csv
+
+# Zepp-native recovery, energy, HRV and exertion metrics
+python3 zepp_health.py hrv --days 14
+python3 zepp_health.py wake-energy --days 14
+python3 zepp_health.py exertion --days 30
+python3 zepp_health.py lifeload --days 30
+python3 zepp_health.py charge-data --days 7
+python3 zepp_health.py daily-status --days 14
+python3 zepp_health.py readiness --days 14
+python3 zepp_health.py readiness --days 14 --latest-per-day
+python3 zepp_health.py sleep-status --days 14
+python3 zepp_health.py event-domains --days 30
+
 # Inspect / manage config
 python3 zepp_health.py config --show          # token shown masked
 python3 zepp_health.py config --path          # which paths are searched
@@ -151,6 +168,84 @@ All data requests are **GET**s to your regional `host`, with header `apptoken: <
 | `user-events-day` | `GET /users/{id}/events/dateString` (e.g. SpO₂ ODI/OSA) |
 | `second-hr` | `GET /users/me/fileInfo/events` (per-second HR file index) |
 | `temperature`, `events` | `GET /v2/users/me/events?eventType=…&subType=…` (watch-centric stream) |
+| `insights` | `GET /v2/users/me/events?eventType=Charge&subType=insight_data` |
+| `hrv` | `GET /v2/users/me/events?eventType=HRVRMSSD&subType=real_data` |
+| `wake-energy` | `GET /v2/users/me/events?eventType=Charge&subType=wake_data` |
+| `exertion` | `GET /v2/users/me/events?eventType=exertion&subType=algo_result` |
+| `lifeload` | `GET /v2/users/me/events?eventType=LifeLoad&subType=summary` |
+| `charge-data` | `GET /v2/users/me/events?eventType=Charge&subType=real_data` |
+| `daily-status` | Consolidates the Zepp-native endpoints above by date |
+| `readiness` | `GET /v2/users/me/events?eventType=readiness&subType=watch_score` |
+| `sleep-status` | Sleep-related fields from `readiness/watch_score` |
+| `event-domains` | Probes known candidate `eventType/subType` pairs |
+
+The `insights` command preserves the raw numeric `type` and `insight` values. Their
+semantic mapping is not yet fully known; no labels are inferred by the CLI. Its
+JSON output is normalized by day, parses `jsonExtra` when valid, and preserves the
+raw string plus a parse error when it is malformed. CSV output contains one row
+per sample.
+
+## Zepp data collection scope
+
+`zepp-health-cli` retrieves, preserves, normalizes, and displays data and
+calculated metrics returned by Zepp. It is a structured Zepp data source for a
+future external analysis layer that may combine Zepp data with Strava activities
+and user goals. It does not calculate proprietary readiness, recovery, ATL/CTL/TSB,
+or BioCharge scores, and it does not provide medical, coaching, or training
+recommendations.
+
+The `hrv` command exposes Zepp's `HRVRMSSD/real_data` samples as RMSSD-like raw
+values; it does not create a daily HRV score. `daily-status` shows the latest
+available HRV sample and factual sample count for each date when no explicit
+daily value is present. Live validation found `readiness/watch_score` records
+with fields such as `hrvScore`, `sleepHRV`, `sleepRHR`, `phyScore`, `mentScore`,
+`skinTempScore`, `ahiScore`, and `rdnsScore`; the CLI preserves their original
+names and does not interpret `status` or any score. Separate sleep summary
+candidate domains returned no records in the validated account.
+
+`readiness --latest-per-day` and `daily-status` deduplicate duplicate
+`readiness/watch_score` records deterministically. The selected record has the
+greatest `timestampUpdate`; if that field is absent, `timestamp` is used. Exact
+ties keep the first record in the API response order. The plain `readiness`
+command continues to expose all records, including duplicates.
+
+`status=200` and repeated `255` values in readiness fields are preserved as raw
+Zepp values. Their sentinel/status semantics are not confirmed by this project,
+so the CLI does not convert them to null, unavailable, or any interpreted score.
+In `daily-status`, readiness-derived sleep fields are grouped under
+`sleep_related_readiness`; this is not a complete Zepp sleep summary. No native
+sleep score or complete sleep summary endpoint was found for the validated
+account.
+
+## ZEPP NATIVE METRIC AVAILABILITY
+
+The following table reflects the live account validation performed for B002.
+
+| Metric | Source | Status |
+|---|---|---|
+| HRV / RMSSD-like samples | `HRVRMSSD/real_data` | Confirmed |
+| Training load / ATL / CTL / TSB | `exertion/algo_result` | Confirmed |
+| `recoveryFactor` | `exertion/algo_result` | Raw field; mapping unknown |
+| Wake metrics | `Charge/wake_data` `value.samples[]` | Confirmed; nested sample extraction |
+| Charge energy time series | `Charge/real_data` `value.samples[]` | Confirmed; raw intraday samples |
+| BioCharge daily summary | `LifeLoad/summary`, BioCharge candidates | No live records |
+| Readiness-related native fields | `readiness/watch_score` | Confirmed; original fields preserved |
+| Sleep-related native fields | `readiness/watch_score` (`sleepHRV`, `sleepRHR`, etc.) | Confirmed; readiness-related subset only |
+| Native sleep summary/score | Candidate sleep domains | Not found for validated account |
+| LifeLoad | `LifeLoad/summary` | No live records |
+| Insight codes | `Charge/insight_data` | Raw; numeric mappings unknown |
+
+`Charge/wake_data` is sample-level and includes fields observed live such as
+`bioChargeWake`, `wakeCharge`, `physicalWake`, `mentalWake`,
+`dailyFitnessScore`, `stressFitnessScore`, and `exertionScore`, plus nested
+`snapshot` and `noWearParams` objects. `Charge/real_data` is also sample-level
+and includes `total`, `physical`, `mental`, `s`, and `u`; the CLI does not
+aggregate it into daily averages or scores. `Charge/summary` returned a
+different battery/charge series (`minCharge`, `maxCharge`, and cumulative
+charging/consumption fields), not a BioCharge daily summary.
+
+`event-domains` probes known candidates only. The API does not expose a
+server-side exhaustive event-domain listing through the current client method.
 
 ## A word on body temperature
 

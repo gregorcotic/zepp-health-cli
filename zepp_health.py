@@ -15,14 +15,17 @@ Credentials are read from (highest priority first):
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import sys
 import urllib.parse
 import uuid
+from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -708,6 +711,26 @@ _EVENT_PRESETS: dict[str, tuple[str, str]] = {
     "lactate-threshold": ("LactateThreshold", "summary"),
 }
 
+EVENT_DOMAIN_CANDIDATES: tuple[tuple[str, str], ...] = (
+    ("Charge", "real_data"),
+    ("Charge", "wake_data"),
+    ("Charge", "insight_data"),
+    ("Charge", "summary"),
+    ("HRVRMSSD", "real_data"),
+    ("exertion", "algo_result"),
+    ("LifeLoad", "summary"),
+    ("readiness", "watch_score"),
+    ("DailyHealth", "summary"),
+    ("BioCharge", "summary"),
+    ("BioCharge", "real_data"),
+    ("recovery", "summary"),
+    ("recovery", "real_data"),
+    ("sleep", "summary"),
+    ("sleep", "score"),
+    ("sleep", "sleep_score"),
+    ("sleep", "real_data"),
+)
+
 
 def _ms_window(days: int) -> tuple[int, int]:
     end = datetime.now(timezone.utc)
@@ -728,6 +751,700 @@ def cmd_events(args: argparse.Namespace) -> None:
     from_ms, to_ms = _ms_window(args.days)
     data = c.events(args.type, args.subtype, from_ms, to_ms, limit=args.limit)
     _emit_json(data, args)
+
+
+def discover_event_domains(
+    fetch: Any,
+    from_ms: int,
+    to_ms: int,
+    candidates: tuple[tuple[str, str], ...] = EVENT_DOMAIN_CANDIDATES,
+) -> list[dict[str, Any]]:
+    """Probe known candidate domains; this is discovery, not a semantic map."""
+    found: list[dict[str, Any]] = []
+    for event_type, sub_type in candidates:
+        try:
+            data = fetch(event_type, sub_type, from_ms, to_ms)
+            count = len(_event_records(data))
+            found.append({
+                "eventType": event_type,
+                "subType": sub_type,
+                "item_count": count,
+                "status": "nonempty" if count else "empty",
+                "source": "zepp",
+            })
+        except requests.RequestException:
+            found.append({
+                "eventType": event_type,
+                "subType": sub_type,
+                "item_count": None,
+                "status": "request_error",
+                "source": "zepp",
+            })
+    return found
+
+
+def cmd_event_domains(args: argparse.Namespace) -> None:
+    c = _load_client()
+    from_ms, to_ms = _ms_window(args.days)
+    domains = discover_event_domains(
+        lambda event_type, sub_type, start, end: c.events(
+            event_type, sub_type, start, end, limit=args.limit
+        ),
+        from_ms,
+        to_ms,
+    )
+    if args.json:
+        _emit_json(domains, args)
+        return
+    print(f"Candidate Zepp event domains ({args.days} days)\n")
+    for domain in domains:
+        print(
+            f"{domain['eventType']} / {domain['subType']}: "
+            f"{domain['status']} ({domain['item_count'] if domain['item_count'] is not None else '—'} items)"
+        )
+    print("\nThis probes known candidates only; it is not an exhaustive server-side domain listing.")
+
+
+def _first_value(mapping: dict[str, Any], *names: str, default: Any = None) -> Any:
+    for name in names:
+        if name in mapping:
+            return mapping[name]
+    return default
+
+
+def _as_number(value: Any) -> Any:
+    """Keep numeric API values numeric, while tolerating absent/empty fields."""
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value
+    try:
+        text = str(value).strip()
+        number = float(text)
+        return int(number) if number.is_integer() else number
+    except (TypeError, ValueError):
+        return value
+
+
+def _event_records(data: Any) -> list[dict[str, Any]]:
+    if isinstance(data, list):
+        return [x for x in data if isinstance(x, dict)]
+    if not isinstance(data, dict):
+        return []
+    for key in ("items", "data", "records", "result"):
+        value = data.get(key)
+        if isinstance(value, list):
+            return [x for x in value if isinstance(x, dict)]
+        if isinstance(value, dict):
+            nested = _event_records(value)
+            if nested:
+                return nested
+    return []
+
+
+def _parse_json_extra(value: Any) -> tuple[Any, str | None]:
+    if value in (None, ""):
+        return None, None
+    if isinstance(value, (dict, list)):
+        return value, None
+    if not isinstance(value, str):
+        return value, None
+    try:
+        return json.loads(value), None
+    except (TypeError, json.JSONDecodeError) as exc:
+        return value, str(exc)
+
+
+def _format_offset(value: Any) -> str:
+    number = _as_number(value)
+    if not isinstance(number, (int, float)):
+        return "—"
+    total_seconds = max(0, int(number) // 1000)
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
+def _record_timezone(record: dict[str, Any]) -> str | None:
+    value = _first_value(record, "timezone", "timeZone", "tz")
+    return str(value) if value else None
+
+
+def _local_datetime(timestamp_ms: Any, timezone_name: str | None) -> datetime | None:
+    timestamp = _as_number(timestamp_ms)
+    if not isinstance(timestamp, (int, float)):
+        return None
+    try:
+        tz = ZoneInfo(timezone_name) if timezone_name else timezone.utc
+    except (KeyError, ValueError):
+        tz = timezone.utc
+    return datetime.fromtimestamp(timestamp / 1000, tz=tz)
+
+
+def normalize_insight_data(data: Any) -> list[dict[str, Any]]:
+    """Normalize Charge/insight_data daily records without assigning meanings."""
+    normalized: list[dict[str, Any]] = []
+    for record in _event_records(data):
+        value = record.get("value") if isinstance(record.get("value"), dict) else {}
+        source = {**value, **record}
+        samples = _first_value(source, "samples", "sample", default=[])
+        if isinstance(samples, dict):
+            samples = [samples]
+        if not isinstance(samples, list):
+            samples = []
+        timestamp = _as_number(_first_value(source, "timestamp", "time", "ts"))
+        start_time = _as_number(_first_value(source, "startTime", "start_time", "start"))
+        timezone_name = _record_timezone(source)
+        local_date = _local_datetime(timestamp, timezone_name)
+        day = _first_value(source, "date", "day", "dayId")
+        if day is None and local_date:
+            day = local_date.date().isoformat()
+        daily: dict[str, Any] = {
+            "date": str(day) if day is not None else None,
+            "timestamp": timestamp,
+            "start_time": start_time,
+            "timezone": timezone_name,
+            "device_id": _first_value(source, "deviceId", "device_id"),
+            "device_type": _first_value(source, "deviceType", "device_type"),
+            "eventType": "Charge",
+            "subType": "insight_data",
+            "event_type": "Charge",
+            "sub_type": "insight_data",
+            "source": "zepp",
+            "calculation_source": "zepp",
+            "mapping_confidence": "unknown",
+            "samples": [],
+        }
+        for raw_sample in samples:
+            if not isinstance(raw_sample, dict):
+                continue
+            extra, extra_error = _parse_json_extra(
+                _first_value(raw_sample, "jsonExtra", "json_extra")
+            )
+            sample: dict[str, Any] = {
+                "insight_id": _as_number(_first_value(raw_sample, "insightId", "insight_id")),
+                "insight": _as_number(raw_sample.get("insight")),
+                "type": _as_number(raw_sample.get("type")),
+                "diff": _as_number(raw_sample.get("diff")),
+                "slope": _as_number(raw_sample.get("slope")),
+                "start_offset_ms": _as_number(_first_value(raw_sample, "s", "start_offset_ms")),
+                "end_offset_ms": _as_number(_first_value(raw_sample, "e", "end_offset_ms")),
+                "track_id": _as_number(_first_value(raw_sample, "trackId", "track_id")),
+                "threshold": _as_number(_first_value(raw_sample, "thres", "threshold")),
+                "u": _as_number(raw_sample.get("u")),
+                "json_extra": extra,
+                "parsed_json_extra": extra,
+            }
+            sample["raw_u"] = sample["u"]
+            if extra_error:
+                sample["json_extra_error"] = extra_error
+            daily["samples"].append(sample)
+        normalized.append(daily)
+    return normalized
+
+
+def _insight_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for record in records:
+        for sample in record["samples"]:
+            rows.append({"date": record["date"], **sample})
+    return rows
+
+
+def _print_insight_output(records: list[dict[str, Any]], days: int) -> None:
+    rows = _insight_rows(records)
+    print(f"Insight data ({days} days)\n")
+    print(f"{'Date':<12} {'Type':>4} {'Insight':>7} {'Diff':>6} {'Slope':>12} {'Start':>8} {'End':>8} {'Track ID':>12}")
+    for row in rows:
+        print(
+            f"{str(row['date'] or '—'):<12} {str(row['type'] if row['type'] is not None else '—'):>4} "
+            f"{str(row['insight'] if row['insight'] is not None else '—'):>7} "
+            f"{str(row['diff'] if row['diff'] is not None else '—'):>6} "
+            f"{str(row['slope'] if row['slope'] is not None else '—'):>12} "
+            f"{_format_offset(row['start_offset_ms']):>8} {_format_offset(row['end_offset_ms']):>8} "
+            f"{str(row['track_id'] if row['track_id'] is not None else '—'):>12}"
+        )
+    type_counts = Counter(str(row["type"]) for row in rows if row["type"] is not None)
+    insight_counts = Counter(str(row["insight"]) for row in rows if row["insight"] is not None)
+    def sort_code(value: str) -> tuple[int, Any]:
+        try:
+            return (0, int(value))
+        except ValueError:
+            return (1, value)
+
+    print("\nUnique insight values: " + ", ".join(sorted(insight_counts, key=sort_code)))
+    print("Unique type values: " + ", ".join(sorted(type_counts, key=sort_code)))
+    print("\nCounts by type:")
+    for key in sorted(type_counts, key=sort_code):
+        print(f"type={key}: {type_counts[key]}")
+    print("Counts by insight:")
+    for key in sorted(insight_counts, key=sort_code):
+        print(f"insight={key}: {insight_counts[key]}")
+
+
+def _write_insight_csv(path: str, records: list[dict[str, Any]]) -> None:
+    fields = ["date", "timestamp", "start_time", "timezone", "device_id", "device_type",
+              "insight_id", "insight", "type", "diff", "slope", "start_offset_ms",
+              "end_offset_ms", "track_id", "threshold", "u", "mins_below_threshold",
+              "diff_below_threshold"]
+    with Path(path).expanduser().open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        for record in records:
+            for sample in record["samples"]:
+                extra = sample.get("json_extra") if isinstance(sample.get("json_extra"), dict) else {}
+                writer.writerow({
+                    **{key: record.get(key) for key in fields},
+                    **{key: sample[key] for key in fields if key in sample},
+                    "mins_below_threshold": extra.get("minsBelowThreshold"),
+                    "diff_below_threshold": extra.get("diffBelowThreshold"),
+                })
+
+
+def cmd_insights(args: argparse.Namespace) -> None:
+    if args.csv and args.json:
+        sys.exit("Use either --json or --csv, not both.")
+    c = _load_client()
+    from_ms, to_ms = _ms_window(args.days)
+    records = normalize_insight_data(c.events("Charge", "insight_data", from_ms, to_ms, limit=args.limit))
+    if args.csv:
+        _write_insight_csv(args.csv, records)
+        print(f"Wrote {args.csv} ({len(_insight_rows(records))} samples)")
+    elif args.json:
+        _emit_json(records, args)
+    else:
+        _print_insight_output(records, args.days)
+
+
+def _record_payload(record: dict[str, Any]) -> dict[str, Any]:
+    value = record.get("value")
+    payload = dict(value) if isinstance(value, dict) else {}
+    payload.update({k: v for k, v in record.items() if k != "value"})
+    return payload
+
+
+def _record_timestamp(record: dict[str, Any], payload: dict[str, Any]) -> Any:
+    return _as_number(_first_value(payload, "timestamp", "time", "ts", "startTime", "start_time"))
+
+
+def _record_date(record: dict[str, Any], payload: dict[str, Any]) -> str | None:
+    day = _first_value(payload, "date", "day", "dayId")
+    if day is not None:
+        return str(day)
+    timestamp = _record_timestamp(record, payload)
+    local = _local_datetime(timestamp, _record_timezone(payload))
+    return local.date().isoformat() if local else None
+
+
+def _provenance(event_type: str, sub_type: str, confidence: str) -> dict[str, str]:
+    return {
+        "eventType": event_type,
+        "subType": sub_type,
+        "event_type": event_type,
+        "sub_type": sub_type,
+        "source": "zepp",
+        "calculation_source": "zepp",
+        "mapping_confidence": confidence,
+    }
+
+
+def _normalize_value_records(
+    data: Any,
+    event_type: str,
+    sub_type: str,
+    fields: tuple[str, ...],
+    *,
+    confidence: str = "confirmed",
+) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    provenance = _provenance(event_type, sub_type, confidence)
+    for record in _event_records(data):
+        payload = _record_payload(record)
+        item: dict[str, Any] = {
+            "date": _record_date(record, payload),
+            "timestamp": _record_timestamp(record, payload),
+            "start_time": _as_number(_first_value(payload, "startTime", "start_time", "start")),
+            **provenance,
+        }
+        for field in fields:
+            if field in payload:
+                item[field] = payload[field]
+        item["raw_value"] = payload
+        normalized.append(item)
+    return normalized
+
+
+def _sample_source(record: dict[str, Any], payload: dict[str, Any]) -> list[dict[str, Any]]:
+    samples = _first_value(payload, "samples", "sample", default=[])
+    if isinstance(samples, dict):
+        return [samples]
+    if isinstance(samples, list):
+        return [sample for sample in samples if isinstance(sample, dict)]
+    return []
+
+
+def _normalize_sample_records(
+    data: Any,
+    event_type: str,
+    sub_type: str,
+    fields: tuple[str, ...],
+    *,
+    confidence: str = "candidate",
+) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    provenance = _provenance(event_type, sub_type, confidence)
+    for record in _event_records(data):
+        payload = _record_payload(record)
+        parent_timestamp = _record_timestamp(record, payload)
+        parent_start = _as_number(_first_value(payload, "startTime", "start_time", "start"))
+        parent_date = _record_date(record, payload)
+        samples = _sample_source(record, payload)
+        if not samples and any(field in payload for field in fields):
+            samples = [payload]
+        for sample in samples:
+            offset = _as_number(_first_value(sample, "s", "start_offset_ms"))
+            sample_timestamp = (
+                parent_start + offset
+                if isinstance(parent_start, (int, float)) and isinstance(offset, (int, float))
+                else parent_timestamp
+            )
+            item: dict[str, Any] = {
+                "date": parent_date,
+                "timestamp": parent_timestamp,
+                "start_time": parent_start,
+                "sample_timestamp": sample_timestamp,
+                **provenance,
+            }
+            for field in fields:
+                if field in sample:
+                    item[field] = sample[field]
+            item["raw_sample"] = sample
+            normalized.append(item)
+    return normalized
+
+
+def normalize_hrv_data(data: Any) -> list[dict[str, Any]]:
+    rows = _normalize_sample_records(
+        data,
+        "HRVRMSSD",
+        "real_data",
+        ("hrv", "s", "u"),
+        confidence="confirmed",
+    )
+    for row in rows:
+        row["offset"] = row.get("s")
+        row["raw_u"] = row.get("u")
+        when = _local_datetime(row.get("sample_timestamp"), None)
+        row["time"] = when.strftime("%H:%M:%S") if when else None
+    return rows
+
+
+def normalize_charge_data(data: Any) -> list[dict[str, Any]]:
+    rows = _normalize_sample_records(
+        data,
+        "Charge",
+        "real_data",
+        ("total", "physical", "mental", "s", "e"),
+        confidence="candidate",
+    )
+    for row in rows:
+        row["start_offset_ms"] = row.get("s")
+        row["end_offset_ms"] = row.get("e")
+    return rows
+
+
+WAKE_FIELDS = (
+    "bioChargeWake",
+    "wakeCharge",
+    "physicalWake",
+    "mentalWake",
+    "dailyFitnessScore",
+    "stressFitnessScore",
+    "exertionScore",
+    "chronicWeightDaily",
+    "avgImpactOnHybridCharge",
+    "noWearParams",
+    "snapshot",
+    "u",
+    "s",
+)
+
+
+READINESS_FIELDS = (
+    "status",
+    "hrvScore",
+    "hrvInsight",
+    "hrvBaseline",
+    "sleepHRV",
+    "rhrScore",
+    "rhrInsight",
+    "rhrBaseline",
+    "sleepRHR",
+    "phyScore",
+    "phyInsight",
+    "phyBaseline",
+    "mentScore",
+    "mentInsight",
+    "mentBaseLine",
+    "skinTempScore",
+    "skinTempInsight",
+    "skinTempBaseLine",
+    "skinTempCalibrated",
+    "ahiScore",
+    "ahiInsight",
+    "ahiBaseline",
+    "rdnsScore",
+    "rdnsInsight",
+    "afibScore",
+    "afibInsight",
+    "timestampUpdate",
+    "insightId",
+)
+
+
+def normalize_wake_data(data: Any) -> list[dict[str, Any]]:
+    """Normalize Charge/wake_data samples, which are nested under value.samples."""
+    return _normalize_sample_records(
+        data, "Charge", "wake_data", WAKE_FIELDS, confidence="confirmed"
+    )
+
+
+def normalize_readiness_data(data: Any) -> list[dict[str, Any]]:
+    """Normalize the native readiness/watch_score value without interpreting status."""
+    rows = _normalize_value_records(
+        data, "readiness", "watch_score", READINESS_FIELDS, confidence="confirmed"
+    )
+    sentinel_fields = {
+        "phyScore", "phyInsight", "phyBaseline", "mentScore", "mentInsight",
+        "mentBaseLine", "hrvInsight", "rhrInsight", "skinTempInsight",
+        "ahiInsight", "afibScore", "afibInsight",
+    }
+    for row in rows:
+        row["status_mapping_confidence"] = "unknown"
+        if any(row.get(field) == 255 for field in sentinel_fields):
+            row["sentinel_255_semantics"] = "unknown"
+    return rows
+
+
+def latest_readiness_per_day(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Select one readiness record per date using Zepp update timestamps.
+
+    The effective ordering is timestampUpdate, falling back to timestamp when
+    timestampUpdate is absent. Exact ties retain the first input record.
+    Records without a date are preserved because they cannot be assigned to a
+    daily bucket safely.
+    """
+    selected: dict[str, tuple[int, dict[str, Any]]] = {}
+    order: list[str] = []
+
+    def number(row: dict[str, Any], key: str) -> int | float | None:
+        value = _as_number(row.get(key))
+        return value if isinstance(value, (int, float)) else None
+
+    def rank(row: dict[str, Any]) -> tuple[int, int | float, int | float]:
+        updated = number(row, "timestampUpdate")
+        timestamp = number(row, "timestamp")
+        effective = updated if updated is not None else timestamp
+        return (
+            1 if effective is not None else 0,
+            effective if effective is not None else -1,
+            timestamp if timestamp is not None else -1,
+        )
+
+    for index, row in enumerate(rows):
+        day = row.get("date")
+        if not day:
+            order.append(f"__missing_date_{index}")
+            selected[order[-1]] = (index, row)
+            continue
+        key = str(day)
+        if key not in selected:
+            order.append(key)
+            selected[key] = (index, row)
+            continue
+        current = selected[key][1]
+        if rank(row) > rank(current):
+            selected[key] = (index, row)
+    return [selected[key][1] for key in order]
+
+
+def _print_rows(title: str, rows: list[dict[str, Any]], columns: tuple[str, ...]) -> None:
+    print(f"{title}\n")
+    if not rows:
+        print("No records.")
+        return
+    print("  " + "  ".join(f"{column:<20}" for column in columns))
+    for row in rows:
+        values = []
+        for column in columns:
+            value = row.get(column)
+            if column in ("s", "e", "offset", "start_offset_ms", "end_offset_ms"):
+                value = _format_offset(value)
+            values.append(str(value if value is not None else "—"))
+        print("  " + "  ".join(f"{value:<20}" for value in values))
+
+
+def cmd_hrv(args: argparse.Namespace) -> None:
+    c = _load_client()
+    from_ms, to_ms = _ms_window(args.days)
+    rows = normalize_hrv_data(c.events("HRVRMSSD", "real_data", from_ms, to_ms, limit=args.limit))
+    if args.json:
+        _emit_json(rows, args)
+    else:
+        _print_rows("Zepp HRV / RMSSD-like samples", rows, ("date", "time", "hrv", "offset", "raw_u"))
+
+
+def cmd_wake_energy(args: argparse.Namespace) -> None:
+    c = _load_client()
+    from_ms, to_ms = _ms_window(args.days)
+    rows = normalize_wake_data(c.events("Charge", "wake_data", from_ms, to_ms, limit=args.limit))
+    if args.json:
+        _emit_json(rows, args)
+    else:
+        _print_rows("Zepp Charge wake_data samples", rows, ("date", "bioChargeWake", "wakeCharge", "physicalWake", "mentalWake", "dailyFitnessScore", "stressFitnessScore", "exertionScore"))
+
+
+def cmd_exertion(args: argparse.Namespace) -> None:
+    c = _load_client()
+    from_ms, to_ms = _ms_window(args.days)
+    rows = _normalize_value_records(
+        c.events("exertion", "algo_result", from_ms, to_ms, limit=args.limit),
+        "exertion", "algo_result",
+        ("recoveryFactor", "totalScore", "activityScore", "exerciseScore", "atl", "ctl", "tsb"),
+    )
+    if args.json:
+        _emit_json(rows, args)
+    else:
+        _print_rows("Zepp exertion / algorithm results", rows, ("date", "recoveryFactor", "totalScore", "activityScore", "exerciseScore", "atl", "ctl", "tsb"))
+
+
+def cmd_lifeload(args: argparse.Namespace) -> None:
+    c = _load_client()
+    from_ms, to_ms = _ms_window(args.days)
+    rows = _normalize_value_records(
+        c.events("LifeLoad", "summary", from_ms, to_ms, limit=args.limit),
+        "LifeLoad", "summary", ("lifeLoad",), confidence="candidate",
+    )
+    if args.json:
+        _emit_json(rows, args)
+    else:
+        _print_rows("Zepp LifeLoad", rows, ("date", "lifeLoad"))
+        print("\nLifeLoad is a candidate related to Zepp's daily BioCharge/body-energy model; exact UI equivalence is not confirmed.")
+
+
+def cmd_readiness(args: argparse.Namespace) -> None:
+    c = _load_client()
+    from_ms, to_ms = _ms_window(args.days)
+    rows = normalize_readiness_data(c.events("readiness", "watch_score", from_ms, to_ms, limit=args.limit))
+    if getattr(args, "latest_per_day", False):
+        rows = latest_readiness_per_day(rows)
+    if args.json:
+        _emit_json(rows, args)
+    else:
+        title = "Zepp readiness/watch_score values"
+        if getattr(args, "latest_per_day", False):
+            title += " (latest per day)"
+        _print_rows(title, rows, ("date", "status", "hrvScore", "sleepHRV", "rhrScore", "sleepRHR", "phyScore", "mentScore", "skinTempScore", "ahiScore", "rdnsScore"))
+
+
+def cmd_sleep_status(args: argparse.Namespace) -> None:
+    c = _load_client()
+    from_ms, to_ms = _ms_window(args.days)
+    rows = normalize_readiness_data(c.events("readiness", "watch_score", from_ms, to_ms, limit=args.limit))
+    if args.json:
+        _emit_json(rows, args)
+    else:
+        _print_rows("Zepp sleep-related readiness/watch_score values", rows, ("date", "sleepHRV", "sleepRHR", "ahiScore", "ahiBaseline", "rdnsScore"))
+
+
+def cmd_charge_data(args: argparse.Namespace) -> None:
+    c = _load_client()
+    from_ms, to_ms = _ms_window(args.days)
+    rows = normalize_charge_data(c.events("Charge", "real_data", from_ms, to_ms, limit=args.limit))
+    if args.json:
+        _emit_json(rows, args)
+    else:
+        _print_rows("Zepp Charge real_data samples", rows, ("date", "s", "e", "total", "physical", "mental"))
+
+
+def consolidate_daily_status(
+    hrv_rows: list[dict[str, Any]],
+    wake_rows: list[dict[str, Any]],
+    exertion_rows: list[dict[str, Any]],
+    lifeload_rows: list[dict[str, Any]],
+    readiness_rows: list[dict[str, Any]] | None = None,
+    sleep_rows: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    readiness_rows = latest_readiness_per_day(readiness_rows or [])
+    sleep_rows = latest_readiness_per_day(sleep_rows or [])
+
+    def bucket(day: str | None) -> dict[str, Any] | None:
+        if not day:
+            return None
+        return grouped.setdefault(day, {"date": day})
+
+    for row in hrv_rows:
+        target = bucket(row.get("date"))
+        if target is None:
+            continue
+        current = target.get("hrv")
+        if current is None or (row.get("sample_timestamp") or 0) >= (current.get("sample_timestamp") or 0):
+            target["hrv"] = {
+                "latest": row.get("hrv"),
+                "sample_timestamp": row.get("sample_timestamp"),
+                "source": "zepp",
+                "calculation_source": "zepp",
+                "mapping_confidence": "confirmed",
+            }
+        target.setdefault("hrv_sample_count", 0)
+        target["hrv_sample_count"] += 1
+    for name, rows, fields in (
+        ("wake_energy", wake_rows, ("bioChargeWake", "wakeCharge", "physicalWake", "mentalWake", "dailyFitnessScore", "stressFitnessScore", "exertionScore")),
+        ("exertion", exertion_rows, ("recoveryFactor", "totalScore", "activityScore", "exerciseScore", "atl", "ctl", "tsb")),
+        ("lifeload", lifeload_rows, ("lifeLoad",)),
+        ("readiness", readiness_rows, READINESS_FIELDS),
+        ("sleep_related_readiness", sleep_rows, ("sleepHRV", "sleepRHR", "ahiScore", "ahiBaseline", "rdnsScore")),
+    ):
+        for row in rows:
+            target = bucket(row.get("date"))
+            if target is None:
+                continue
+            target[name] = {
+                field: row.get(field) for field in fields if field in row
+            }
+            target[name].update({
+                "source": row["source"],
+                "calculation_source": row["calculation_source"],
+                "mapping_confidence": row["mapping_confidence"],
+            })
+            for metadata in ("status_mapping_confidence", "sentinel_255_semantics"):
+                if metadata in row:
+                    target[name][metadata] = row[metadata]
+    return [grouped[key] for key in sorted(grouped)]
+
+
+def cmd_daily_status(args: argparse.Namespace) -> None:
+    c = _load_client()
+    from_ms, to_ms = _ms_window(args.days)
+    hrv = normalize_hrv_data(c.events("HRVRMSSD", "real_data", from_ms, to_ms, limit=args.limit))
+    wake = normalize_wake_data(c.events("Charge", "wake_data", from_ms, to_ms, limit=args.limit))
+    exertion = _normalize_value_records(c.events("exertion", "algo_result", from_ms, to_ms, limit=args.limit), "exertion", "algo_result", ("recoveryFactor", "totalScore", "activityScore", "exerciseScore", "atl", "ctl", "tsb"))
+    lifeload = _normalize_value_records(c.events("LifeLoad", "summary", from_ms, to_ms, limit=args.limit), "LifeLoad", "summary", ("lifeLoad",), confidence="candidate")
+    readiness = normalize_readiness_data(c.events("readiness", "watch_score", from_ms, to_ms, limit=args.limit))
+    rows = consolidate_daily_status(hrv, wake, exertion, lifeload, readiness, readiness)
+    if args.json:
+        _emit_json(rows, args)
+    else:
+        print(f"Daily Zepp status ({args.days} days)\n")
+        for row in rows:
+            print(f"{row['date']}")
+            if "hrv" in row:
+                print(f"  HRV latest={row['hrv']['latest']} samples={row['hrv_sample_count']}")
+            for section in ("wake_energy", "exertion", "lifeload", "readiness", "sleep_related_readiness"):
+                if section in row:
+                    values = " ".join(f"{k}={v}" for k, v in row[section].items() if k not in ("source", "calculation_source", "mapping_confidence"))
+                    print(f"  {section}: {values}")
 
 
 def cmd_temperature(args: argparse.Namespace) -> None:
@@ -964,6 +1681,75 @@ def main() -> None:
     _add_days(sp)
     _add_json(sp)
     sp.set_defaults(func=cmd_summary)
+
+    sp = sub.add_parser(
+        "insights",
+        help="Normalized Charge/insight_data records",
+    )
+    _add_days(sp)
+    _add_json(sp)
+    sp.add_argument("--csv", metavar="PATH", help="Export one row per sample to CSV")
+    sp.add_argument("--limit", type=int, default=2000)
+    sp.set_defaults(func=cmd_insights)
+
+    sp = sub.add_parser("hrv", help="Zepp HRVRMSSD real_data samples")
+    _add_days(sp)
+    _add_json(sp)
+    sp.add_argument("--limit", type=int, default=2000)
+    sp.set_defaults(func=cmd_hrv)
+
+    sp = sub.add_parser("wake-energy", help="Zepp Charge wake_data metrics")
+    _add_days(sp)
+    _add_json(sp)
+    sp.add_argument("--limit", type=int, default=2000)
+    sp.set_defaults(func=cmd_wake_energy)
+
+    sp = sub.add_parser("exertion", help="Zepp exertion algo_result metrics")
+    _add_days(sp)
+    _add_json(sp)
+    sp.add_argument("--limit", type=int, default=2000)
+    sp.set_defaults(func=cmd_exertion)
+
+    sp = sub.add_parser("lifeload", help="Zepp LifeLoad summary values")
+    _add_days(sp)
+    _add_json(sp)
+    sp.add_argument("--limit", type=int, default=2000)
+    sp.set_defaults(func=cmd_lifeload)
+
+    sp = sub.add_parser("charge-data", help="Zepp Charge real_data samples")
+    _add_days(sp)
+    _add_json(sp)
+    sp.add_argument("--limit", type=int, default=2000)
+    sp.set_defaults(func=cmd_charge_data)
+
+    sp = sub.add_parser("daily-status", help="Consolidated Zepp-native daily metrics")
+    _add_days(sp)
+    _add_json(sp)
+    sp.add_argument("--limit", type=int, default=2000)
+    sp.set_defaults(func=cmd_daily_status)
+
+    sp = sub.add_parser("readiness", help="Zepp readiness/watch_score values")
+    _add_days(sp)
+    _add_json(sp)
+    sp.add_argument("--limit", type=int, default=2000)
+    sp.add_argument(
+        "--latest-per-day",
+        action="store_true",
+        help="Select the latest readiness/watch_score record per date",
+    )
+    sp.set_defaults(func=cmd_readiness)
+
+    sp = sub.add_parser("sleep-status", help="Sleep-related Zepp readiness/watch_score values")
+    _add_days(sp)
+    _add_json(sp)
+    sp.add_argument("--limit", type=int, default=2000)
+    sp.set_defaults(func=cmd_sleep_status)
+
+    sp = sub.add_parser("event-domains", help="Probe known Zepp eventType/subType domains")
+    _add_days(sp)
+    _add_json(sp)
+    sp.add_argument("--limit", type=int, default=2000)
+    sp.set_defaults(func=cmd_event_domains)
 
     sp = sub.add_parser(
         "temperature",
