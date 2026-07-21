@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
+import tempfile
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -495,6 +497,105 @@ class Database:
                 values.update({"source": "zepp", "calculation_source": "zepp", "mapping_confidence": "confirmed"})
                 target[name] = values
         return [rows[key] for key in sorted(rows)]
+
+
+def inspect_database_file(path: str | Path) -> dict[str, Any]:
+    """Inspect an existing SQLite file without migrating or changing it."""
+    database_path = Path(path).expanduser()
+    if not database_path.is_file():
+        raise FileNotFoundError(str(database_path))
+    connection = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True, timeout=30.0)
+    connection.row_factory = sqlite3.Row
+    try:
+        integrity = str(connection.execute("PRAGMA integrity_check").fetchone()[0])
+        foreign_keys = [dict(row) for row in connection.execute("PRAGMA foreign_key_check").fetchall()]
+        journal_mode = str(connection.execute("PRAGMA journal_mode").fetchone()[0])
+        schema_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        tables = [
+            "hrv_samples", "hrv_daily", "wake_energy", "exertion_records",
+            "readiness_records", "sleep_related_readiness", "charge_records",
+            "insight_records", "lifeload_records", "raw_payloads", "sync_runs",
+            "sync_run_domains",
+        ]
+        counts: dict[str, int] = {}
+        for table in tables:
+            exists = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+            ).fetchone()
+            counts[table] = int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]) if exists else 0
+        latest_sync = connection.execute(
+            "SELECT finished_at, status FROM sync_runs WHERE finished_at IS NOT NULL ORDER BY finished_at DESC LIMIT 1"
+        ).fetchone() if counts["sync_runs"] else None
+        sidecars = {}
+        for suffix in ("-wal", "-shm"):
+            sidecar = Path(str(database_path) + suffix)
+            sidecars[suffix[1:]] = {"exists": sidecar.exists(), "size_bytes": sidecar.stat().st_size if sidecar.exists() else 0}
+        return {
+            "database_path": str(database_path),
+            "integrity_check": integrity,
+            "foreign_key_check": foreign_keys,
+            "journal_mode": journal_mode,
+            "schema_version": schema_version,
+            "database_size_bytes": database_path.stat().st_size,
+            "sidecars": sidecars,
+            "record_counts": counts,
+            "latest_sync": dict(latest_sync) if latest_sync else None,
+        }
+    finally:
+        connection.close()
+
+
+def _backup_sqlite(source: Path, target: Path, overwrite: bool) -> None:
+    if not source.is_file():
+        raise FileNotFoundError(str(source))
+    if target.exists() and not overwrite:
+        raise FileExistsError(str(target))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
+    os.close(fd)
+    temporary = Path(temporary_name)
+    try:
+        source_connection = sqlite3.connect(f"file:{source}?mode=ro", uri=True, timeout=30.0)
+        target_connection = sqlite3.connect(temporary, timeout=30.0)
+        try:
+            source_connection.backup(target_connection)
+            target_connection.commit()
+        finally:
+            target_connection.close()
+            source_connection.close()
+        checked = inspect_database_file(temporary)
+        if checked["integrity_check"] != "ok" or checked["foreign_key_check"]:
+            raise sqlite3.DatabaseError("backup integrity check failed")
+        os.replace(temporary, target)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def backup_database(source: str | Path, target: str | Path, overwrite: bool = False) -> dict[str, Any]:
+    source_path = Path(source).expanduser()
+    target_path = Path(target).expanduser()
+    source_info = inspect_database_file(source_path)
+    if source_info["integrity_check"] != "ok" or source_info["foreign_key_check"]:
+        raise sqlite3.DatabaseError("source database integrity check failed")
+    _backup_sqlite(source_path, target_path, overwrite)
+    result = inspect_database_file(target_path)
+    result.update({"source_path": str(source_path), "output_path": str(target_path)})
+    return result
+
+
+def restore_database(source: str | Path, target: str | Path, overwrite: bool = False) -> dict[str, Any]:
+    source_path = Path(source).expanduser()
+    target_path = Path(target).expanduser()
+    source_info = inspect_database_file(source_path)
+    if source_info["integrity_check"] != "ok" or source_info["foreign_key_check"]:
+        raise sqlite3.DatabaseError("source backup integrity check failed")
+    _backup_sqlite(source_path, target_path, overwrite)
+    result = inspect_database_file(target_path)
+    if result["schema_version"] != source_info["schema_version"] or result["record_counts"] != source_info["record_counts"]:
+        raise sqlite3.DatabaseError("restored database does not match source")
+    result.update({"source_path": str(source_path), "output_path": str(target_path), "counts_match": True})
+    return result
 
 
 def _domain_rows(domain: str, rows: list[dict[str, Any]]) -> list[tuple[str, list[dict[str, Any]], tuple[str, ...]]]:

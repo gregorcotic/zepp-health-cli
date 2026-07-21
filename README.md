@@ -138,6 +138,9 @@ python3 zepp_health.py sync-db --days 30
 python3 zepp_health.py sync-db --days 30 --json
 python3 zepp_health.py db-status
 python3 zepp_health.py daily-status --days 14 --from-db
+python3 zepp_health.py db-check
+python3 zepp_health.py db-backup --output backups/zepp_health_$(date +%Y-%m-%d).db
+python3 zepp_health.py db-restore --input backups/zepp_health_YYYY-MM-DD.db --db restore-test/zepp_health.db
 
 # Inspect / manage config
 python3 zepp_health.py config --show          # token shown masked

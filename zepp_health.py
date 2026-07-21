@@ -18,6 +18,7 @@ import argparse
 import csv
 import json
 import os
+import sqlite3
 import sys
 import time
 import urllib.parse
@@ -29,7 +30,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import requests
-from zepp_db import Database, resolve_db_path
+from zepp_db import Database, backup_database, inspect_database_file, resolve_db_path, restore_database
 
 DEFAULT_HOST = "api-mifit-us3.zepp.com"
 
@@ -1607,6 +1608,59 @@ def cmd_db_status(args: argparse.Namespace) -> None:
         print(f"  {table}: {count}")
 
 
+def _database_operation_error(exc: Exception) -> None:
+    # Keep operational errors concise and independent of API/config contents.
+    raise SystemExit(f"Database operation failed: {type(exc).__name__}") from None
+
+
+def cmd_db_check(args: argparse.Namespace) -> None:
+    try:
+        result = inspect_database_file(_db_path_from_args(args))
+    except (OSError, sqlite3.DatabaseError, ValueError) as exc:
+        _database_operation_error(exc)
+    if args.json:
+        _emit_json(result, args)
+        return
+    print(f"Database: {result['database_path']}")
+    print(f"Integrity: {result['integrity_check']}")
+    print(f"Foreign keys: {'ok' if not result['foreign_key_check'] else 'violations'}")
+    print(f"Schema version: {result['schema_version']}")
+    print(f"Journal mode: {result['journal_mode']}")
+    print(f"Size: {result['database_size_bytes']} bytes")
+    print(f"Latest sync: {result['latest_sync'] or '—'}")
+
+
+def cmd_db_backup(args: argparse.Namespace) -> None:
+    try:
+        result = backup_database(_db_path_from_args(args), args.output, args.overwrite)
+    except (OSError, sqlite3.DatabaseError, ValueError) as exc:
+        _database_operation_error(exc)
+    if args.json:
+        _emit_json(result, args)
+        return
+    print(f"Backup created: {result['output_path']}")
+    print(f"Size: {result['database_size_bytes']} bytes")
+    print(f"Schema version: {result['schema_version']}")
+    print(f"Integrity: {result['integrity_check']}")
+
+
+def cmd_db_restore(args: argparse.Namespace) -> None:
+    if not args.db_path:
+        raise SystemExit("Database operation failed: --db target is required")
+    try:
+        result = restore_database(args.input, args.db_path, args.overwrite)
+    except (OSError, sqlite3.DatabaseError, ValueError) as exc:
+        _database_operation_error(exc)
+    if args.json:
+        _emit_json(result, args)
+        return
+    print(f"Restore created: {result['output_path']}")
+    print(f"Size: {result['database_size_bytes']} bytes")
+    print(f"Schema version: {result['schema_version']}")
+    print(f"Integrity: {result['integrity_check']}")
+    print(f"Counts match: {result['counts_match']}")
+
+
 def cmd_temperature(args: argparse.Namespace) -> None:
     c = _load_client()
     et, st = _EVENT_PRESETS["temperature"]
@@ -1915,6 +1969,25 @@ def main() -> None:
     _add_json(sp)
     _add_db(sp)
     sp.set_defaults(func=cmd_db_status)
+
+    sp = sub.add_parser("db-check", help="Run SQLite integrity and foreign-key checks")
+    _add_json(sp)
+    _add_db(sp)
+    sp.set_defaults(func=cmd_db_check)
+
+    sp = sub.add_parser("db-backup", help="Create a consistent SQLite backup")
+    _add_json(sp)
+    _add_db(sp)
+    sp.add_argument("--output", required=True, help="Backup file path")
+    sp.add_argument("--overwrite", action="store_true", help="Replace an existing backup explicitly")
+    sp.set_defaults(func=cmd_db_backup)
+
+    sp = sub.add_parser("db-restore", help="Restore a SQLite backup to a new path")
+    _add_json(sp)
+    _add_db(sp)
+    sp.add_argument("--input", required=True, help="SQLite backup file path")
+    sp.add_argument("--overwrite", action="store_true", help="Replace an existing target explicitly")
+    sp.set_defaults(func=cmd_db_restore)
 
     sp = sub.add_parser("readiness", help="Zepp readiness/watch_score values")
     _add_days(sp)

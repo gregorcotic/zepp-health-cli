@@ -63,7 +63,7 @@ sidecar files.
 
 ## Migrations and deployment
 
-The database initializes with schema version 1. Future compatible schema
+The database initializes with schema version 2. Future compatible schema
 changes must increment the migration version and apply transactional migrations
 before normal reads/writes. The database is runtime state, not source code:
 
@@ -75,3 +75,34 @@ python3 zepp_health.py db-status --db /opt/zepp-health-cli/data/zepp_health.db
 ```
 
 `git pull` does not overwrite ignored local database files.
+
+## Integrity, backup, and restore
+
+Run checks without contacting Zepp:
+
+```bash
+python3 zepp_health.py db-check --db data/zepp_health.db
+python3 zepp_health.py db-check --db data/zepp_health.db --json
+```
+
+The database uses WAL mode. Create backups with Python's SQLite backup API so
+the main file and WAL state are captured consistently; do not copy only the
+`.db` file while the database is active:
+
+```bash
+python3 zepp_health.py db-backup --output backups/zepp_health_$(date +%Y-%m-%d).db
+```
+
+Existing output is refused unless `--overwrite` is supplied explicitly.
+Backups are integrity-checked before publication. Restore to a separate path:
+
+```bash
+python3 zepp_health.py db-restore --input backups/zepp_health_YYYY-MM-DD.db --db restore-test/zepp_health.db
+python3 zepp_health.py db-check --db restore-test/zepp_health.db
+```
+
+Restore validates the source, refuses an existing target by default, and
+compares schema version and table counts after restore. Keep backups private.
+A practical manual retention policy is daily backups for 7 days, weekly
+backups for 4 weeks, and monthly backups for 6 months; deletion is not
+automated by this project.

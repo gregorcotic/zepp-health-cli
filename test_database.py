@@ -9,7 +9,14 @@ from unittest.mock import patch
 
 import requests
 
-from zepp_db import Database, SCHEMA_VERSION, resolve_db_path
+from zepp_db import (
+    Database,
+    SCHEMA_VERSION,
+    backup_database,
+    inspect_database_file,
+    resolve_db_path,
+    restore_database,
+)
 from zepp_health import sync_native_metrics
 
 
@@ -145,6 +152,41 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(rows[0]["sleep_related_readiness"]["sleepHRV"], "42")
             self.assertEqual(rows[0]["hrv_sample_count"], 1)
             db.close()
+
+    def test_integrity_backup_restore_and_existing_target_refusal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.db"
+            backup = root / "backups" / "backup.db"
+            restored = root / "restore" / "restored.db"
+            db = Database(source)
+            sync_native_metrics(FakeClient(fixture_responses()), db, 30)
+            db.close()
+
+            checked = inspect_database_file(source)
+            self.assertEqual(checked["integrity_check"], "ok")
+            self.assertEqual(checked["foreign_key_check"], [])
+            result = backup_database(source, backup)
+            self.assertEqual(result["integrity_check"], "ok")
+            self.assertEqual(result["record_counts"], checked["record_counts"])
+            with self.assertRaises(FileExistsError):
+                backup_database(source, backup)
+            backup_database(source, backup, overwrite=True)
+
+            restored_result = restore_database(backup, restored)
+            self.assertTrue(restored_result["counts_match"])
+            self.assertEqual(restored_result["record_counts"], checked["record_counts"])
+            with self.assertRaises(FileExistsError):
+                restore_database(backup, restored)
+
+    def test_corrupt_backup_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            corrupt = Path(directory) / "corrupt.db"
+            corrupt.write_text("not a sqlite database", encoding="utf-8")
+            with self.assertRaises(sqlite3.DatabaseError):
+                inspect_database_file(corrupt)
+            with self.assertRaises(sqlite3.DatabaseError):
+                backup_database(corrupt, Path(directory) / "copy.db")
 
 
 if __name__ == "__main__":
