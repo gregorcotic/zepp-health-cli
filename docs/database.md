@@ -1,0 +1,77 @@
+# SQLite persistence
+
+`zepp-health-cli` stores retrieved native Zepp data locally for later use by
+Coach AI Agent. The database is not a web service and is never exposed by this
+project.
+
+## Path precedence
+
+The database path is resolved in this order:
+
+1. CLI `--db PATH` (before or after the relevant subcommand)
+2. `db_path` in the selected `config.json`
+3. `ZEPP_DB_PATH`
+4. `data/zepp_health.db`
+
+Relative paths are relative to the current working directory. On Ubuntu, a
+recommended local path is `/opt/zepp-health-cli/data/zepp_health.db`; the
+runtime user must own or be able to write the `data/` directory.
+
+## Commands
+
+```bash
+python3 zepp_health.py sync-db --days 30
+python3 zepp_health.py sync-db --days 30 --db /opt/zepp-health-cli/data/zepp_health.db --json
+python3 zepp_health.py db-status
+python3 zepp_health.py daily-status --days 14 --from-db
+```
+
+`sync-db` initializes the database, fetches each native domain independently,
+and records inserted, updated, unchanged, empty, and failed domains. A failed
+domain does not roll back successful domains from the same run. Each domain's
+normalized records and raw payload insertion use a SQLite transaction.
+
+## Schema
+
+- `schema_meta`: schema metadata; SQLite `PRAGMA user_version` is the migration version.
+- `hrv_samples`: Zepp HRV/RMSSD-like samples. `hrv_daily` is reserved for explicit Zepp daily HRV values; no local daily aggregate is inserted.
+- `wake_energy`: `Charge/wake_data` samples.
+- `exertion_records`: `exertion/algo_result` values, including raw `recoveryFactor`, ATL, CTL, and TSB.
+- `readiness_records`: `readiness/watch_score` records, including raw status and sentinel values.
+- `sleep_related_readiness`: readiness-derived sleep fields; this is not a complete sleep summary.
+- `charge_records`: `Charge/real_data` samples.
+- `insight_records`: normalized `Charge/insight_data` samples and unknown codes.
+- `raw_payloads`: deduplicated sanitized JSON responses for future reverse engineering.
+- `sync_runs` and `sync_run_domains`: synchronization provenance and outcomes.
+
+Normalized tables use deterministic `record_key` values and UPSERT behavior.
+Repeating a sync does not create duplicate logical records. Raw payloads are
+deduplicated by SHA-256 of sanitized JSON.
+
+Source timestamps are stored as epoch millisecond columns where available;
+original values remain in `source_json`. No health or training metrics are
+calculated locally.
+
+## Raw payload and security policy
+
+Raw responses are JSON text, but credential-like keys including app tokens,
+authorization/cookie values, and user-id keys are removed before storage. The
+database still contains personal health data and must be treated as private.
+Back it up as a private file, restrict filesystem permissions, and never serve
+it through a public HTTP endpoint. Git ignores `data/`, SQLite files, and WAL
+sidecar files.
+
+## Migrations and deployment
+
+The database initializes with schema version 1. Future compatible schema
+changes must increment the migration version and apply transactional migrations
+before normal reads/writes. The database is runtime state, not source code:
+
+```bash
+cd /opt/zepp-health-cli
+git pull origin main
+python3 zepp_health.py sync-db --days 30 --db /opt/zepp-health-cli/data/zepp_health.db
+python3 zepp_health.py db-status --db /opt/zepp-health-cli/data/zepp_health.db
+```
+
+`git pull` does not overwrite ignored local database files.

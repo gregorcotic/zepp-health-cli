@@ -1,5 +1,11 @@
 # Secrets / personal data — NEVER commit these
 config.json
+
+# Local SQLite data — never commit runtime health data
+data/
+*.db
+*.db-wal
+*.db-shm
 .env
 .envrc
 # Proxy / network captures (any tool)

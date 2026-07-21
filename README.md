@@ -133,6 +133,12 @@ python3 zepp_health.py readiness --days 14 --latest-per-day
 python3 zepp_health.py sleep-status --days 14
 python3 zepp_health.py event-domains --days 30
 
+# Persist native Zepp data locally in SQLite
+python3 zepp_health.py sync-db --days 30
+python3 zepp_health.py sync-db --days 30 --json
+python3 zepp_health.py db-status
+python3 zepp_health.py daily-status --days 14 --from-db
+
 # Inspect / manage config
 python3 zepp_health.py config --show          # token shown masked
 python3 zepp_health.py config --path          # which paths are searched
@@ -246,6 +252,24 @@ charging/consumption fields), not a BioCharge daily summary.
 
 `event-domains` probes known candidates only. The API does not expose a
 server-side exhaustive event-domain listing through the current client method.
+
+## SQLite native data persistence
+
+Native Zepp values can be synchronized to a private local SQLite database:
+
+```bash
+python3 zepp_health.py sync-db --days 30
+python3 zepp_health.py db-status
+python3 zepp_health.py daily-status --days 14 --from-db
+```
+
+The default path is `data/zepp_health.db`. Database path precedence is:
+CLI `--db PATH`, `db_path` in `config.json`, `ZEPP_DB_PATH`, then the default.
+Use `/opt/zepp-health-cli/data/zepp_health.db` on Ubuntu and ensure the runtime
+user can write that directory. Database files and WAL sidecars are Git-ignored,
+remain local, and are never exposed publicly. See [docs/database.md](docs/database.md)
+for schema, idempotency, migrations, raw payload policy, backup, and deployment
+details.
 
 ## A word on body temperature
 

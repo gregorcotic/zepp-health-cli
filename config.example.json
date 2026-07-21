@@ -5,5 +5,6 @@
   "app_platform": "ios_phone",
   "lang": "en",
   "country": "US",
-  "timezone": "UTC"
+  "timezone": "UTC",
+  "db_path": "data/zepp_health.db"
 }

@@ -19,6 +19,7 @@ import csv
 import json
 import os
 import sys
+import time
 import urllib.parse
 import uuid
 from collections import Counter
@@ -28,6 +29,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import requests
+from zepp_db import Database, resolve_db_path
 
 DEFAULT_HOST = "api-mifit-us3.zepp.com"
 
@@ -46,6 +48,7 @@ CONFIG_KEYS = (
     "user_agent",
     "cv",
     "vb",
+    "db_path",
 )
 ENV_BY_KEY = {
     "app_token": "ZEPP_APP_TOKEN",
@@ -947,7 +950,12 @@ def _insight_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for record in records:
         for sample in record["samples"]:
-            rows.append({"date": record["date"], **sample})
+            rows.append({
+                "date": record["date"],
+                "timestamp": record.get("timestamp"),
+                "start_time": record.get("start_time"),
+                **sample,
+            })
     return rows
 
 
@@ -1425,6 +1433,27 @@ def consolidate_daily_status(
 
 
 def cmd_daily_status(args: argparse.Namespace) -> None:
+    if getattr(args, "from_db", False):
+        end = _today_utc()
+        start = end - timedelta(days=args.days - 1)
+        database = Database(_db_path_from_args(args))
+        try:
+            rows = database.read_daily_status(start.isoformat(), end.isoformat())
+        finally:
+            database.close()
+        if args.json:
+            _emit_json(rows, args)
+            return
+        print(f"Daily Zepp status from SQLite ({args.days} days)\n")
+        for row in rows:
+            print(row["date"])
+            if "hrv" in row:
+                print(f"  HRV latest={row['hrv']['latest']} samples={row['hrv_sample_count']}")
+            for section in ("wake_energy", "exertion", "lifeload", "readiness", "sleep_related_readiness"):
+                if section in row:
+                    values = " ".join(f"{k}={v}" for k, v in row[section].items() if k not in ("source", "calculation_source", "mapping_confidence"))
+                    print(f"  {section}: {values}")
+        return
     c = _load_client()
     from_ms, to_ms = _ms_window(args.days)
     hrv = normalize_hrv_data(c.events("HRVRMSSD", "real_data", from_ms, to_ms, limit=args.limit))
@@ -1445,6 +1474,137 @@ def cmd_daily_status(args: argparse.Namespace) -> None:
                 if section in row:
                     values = " ".join(f"{k}={v}" for k, v in row[section].items() if k not in ("source", "calculation_source", "mapping_confidence"))
                     print(f"  {section}: {values}")
+
+
+SYNC_DOMAIN_SPECS: tuple[tuple[str, str, str, Any], ...] = (
+    ("hrv", "HRVRMSSD", "real_data", normalize_hrv_data),
+    ("wake_energy", "Charge", "wake_data", normalize_wake_data),
+    ("exertion", "exertion", "algo_result", lambda data: _normalize_value_records(data, "exertion", "algo_result", ("recoveryFactor", "totalScore", "activityScore", "exerciseScore", "atl", "ctl", "tsb"))),
+    ("readiness", "readiness", "watch_score", normalize_readiness_data),
+    ("charge", "Charge", "real_data", normalize_charge_data),
+    ("insights", "Charge", "insight_data", lambda data: _insight_rows(normalize_insight_data(data))),
+    ("lifeload", "LifeLoad", "summary", lambda data: _normalize_value_records(data, "LifeLoad", "summary", ("lifeLoad",), confidence="candidate")),
+)
+
+
+def _sync_summary_result(
+    domain: str,
+    event_type: str,
+    sub_type: str,
+    *,
+    status: str,
+    records_retrieved: int = 0,
+    inserted: int = 0,
+    updated: int = 0,
+    unchanged: int = 0,
+    error: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "domain": domain,
+        "event_type": event_type,
+        "sub_type": sub_type,
+        "status": status,
+        "records_retrieved": records_retrieved,
+        "inserted": inserted,
+        "updated": updated,
+        "unchanged": unchanged,
+        "error": error,
+    }
+
+
+def sync_native_metrics(
+    client: ZeppClient,
+    database: Database,
+    days: int,
+    *,
+    limit: int = 2000,
+) -> dict[str, Any]:
+    """Fetch and persist native domains independently, continuing after errors."""
+    from_ms, to_ms = _ms_window(days)
+    run_id = database.start_sync(days, from_ms, to_ms)
+    started = time.perf_counter()
+    domains: list[dict[str, Any]] = []
+    try:
+        for domain, event_type, sub_type, normalizer in SYNC_DOMAIN_SPECS:
+            try:
+                payload = client.events(event_type, sub_type, from_ms, to_ms, limit=limit)
+                rows = normalizer(payload)
+                counts = database.store_domain_with_raw(
+                    domain, event_type, sub_type, payload, from_ms, to_ms, rows
+                )
+                result = _sync_summary_result(
+                    domain, event_type, sub_type,
+                    status="ok" if rows else "empty",
+                    records_retrieved=len(rows),
+                    **counts,
+                )
+            except Exception as exc:
+                # Do not expose request URLs, response text, or config values.
+                result = _sync_summary_result(
+                    domain, event_type, sub_type,
+                    status="error",
+                    error=type(exc).__name__,
+                )
+            domains.append(result)
+            database.record_sync_domain(run_id, result)
+        status = "ok" if not any(row["status"] == "error" for row in domains) else "partial"
+        summary = {
+            "requested_days": days,
+            "from_ms": from_ms,
+            "to_ms": to_ms,
+            "database_path": str(database.path),
+            "domains": domains,
+            "duration_seconds": round(time.perf_counter() - started, 3),
+        }
+        database.finish_sync(run_id, status, summary)
+        return {"sync_run_id": run_id, "status": status, **summary}
+    except Exception:
+        database.finish_sync(run_id, "error", {"error": "sync_orchestration_error"})
+        raise
+
+
+def _db_path_from_args(args: argparse.Namespace) -> Path:
+    return resolve_db_path(getattr(args, "db_path", None), load_config())
+
+
+def cmd_sync_db(args: argparse.Namespace) -> None:
+    database = Database(_db_path_from_args(args))
+    try:
+        result = sync_native_metrics(_load_client(), database, args.days, limit=args.limit)
+    finally:
+        database.close()
+    if args.json:
+        _emit_json(result, args)
+        return
+    print(f"SQLite synchronization: {result['status']}")
+    print(f"Database: {result['database_path']}")
+    print(f"Range: {result['from_ms']} .. {result['to_ms']}")
+    for domain in result["domains"]:
+        print(
+            f"  {domain['domain']}: {domain['status']} "
+            f"retrieved={domain['records_retrieved']} inserted={domain['inserted']} "
+            f"updated={domain['updated']} unchanged={domain['unchanged']}"
+            + (f" error={domain['error']}" if domain.get("error") else "")
+        )
+    print(f"Duration: {result['duration_seconds']:.3f}s")
+
+
+def cmd_db_status(args: argparse.Namespace) -> None:
+    database = Database(_db_path_from_args(args))
+    try:
+        result = database.status()
+    finally:
+        database.close()
+    if args.json:
+        _emit_json(result, args)
+        return
+    print(f"Database: {result['database_path']}")
+    print(f"Schema version: {result['schema_version']}")
+    print(f"Date range: {result['date_range']['from']} .. {result['date_range']['to']}")
+    print(f"Latest sync: {result['latest_sync_at'] or '—'}")
+    print("Record counts:")
+    for table, count in result["record_counts"].items():
+        print(f"  {table}: {count}")
 
 
 def cmd_temperature(args: argparse.Namespace) -> None:
@@ -1526,6 +1686,12 @@ def main() -> None:
         "--config",
         help="Path to config.json (default: ./config.json or ~/.config/zepp/config.json)",
     )
+    p.add_argument(
+        "--db",
+        dest="db_path",
+        default=None,
+        help="SQLite database path (highest priority; default data/zepp_health.db)",
+    )
     sub = p.add_subparsers(dest="cmd", required=True)
 
     def _add_days(parser: argparse.ArgumentParser) -> None:
@@ -1542,6 +1708,14 @@ def main() -> None:
             "--json",
             action="store_true",
             help="Output compact JSON on one line (easy to pipe to jq)",
+        )
+
+    def _add_db(parser: argparse.ArgumentParser) -> None:
+        parser.add_argument(
+            "--db",
+            dest="db_path",
+            default=argparse.SUPPRESS,
+            help="SQLite database path (overrides config/env/default)",
         )
 
     sp = sub.add_parser("sport-load", help="Daily training load (WatchSportStatistics)")
@@ -1725,8 +1899,22 @@ def main() -> None:
     sp = sub.add_parser("daily-status", help="Consolidated Zepp-native daily metrics")
     _add_days(sp)
     _add_json(sp)
+    _add_db(sp)
+    sp.add_argument("--from-db", action="store_true", help="Read stored data without contacting Zepp")
     sp.add_argument("--limit", type=int, default=2000)
     sp.set_defaults(func=cmd_daily_status)
+
+    sp = sub.add_parser("sync-db", help="Fetch native Zepp metrics into SQLite")
+    _add_days(sp)
+    _add_json(sp)
+    _add_db(sp)
+    sp.add_argument("--limit", type=int, default=2000)
+    sp.set_defaults(func=cmd_sync_db)
+
+    sp = sub.add_parser("db-status", help="Inspect local Zepp SQLite database")
+    _add_json(sp)
+    _add_db(sp)
+    sp.set_defaults(func=cmd_db_status)
 
     sp = sub.add_parser("readiness", help="Zepp readiness/watch_score values")
     _add_days(sp)
