@@ -20,7 +20,7 @@ from zepp_db import (
     resolve_db_path,
     restore_database,
 )
-from zepp_health import sync_native_metrics
+from zepp_health import backfill_native_metrics, sync_native_metrics
 from zepp_ops import SyncLock, lock_is_held
 
 
@@ -29,7 +29,7 @@ class FakeClient:
         self.responses = responses
         self.failures = set(failures or ())
 
-    def events(self, event_type, sub_type, from_ms, to_ms, *, limit=2000):
+    def events(self, event_type, sub_type, from_ms, to_ms, *, limit=2000, reverse=True):
         key = (event_type, sub_type)
         if key in self.failures:
             raise requests.ConnectionError("fixture network failure")
@@ -67,6 +67,33 @@ def fixture_responses():
 
 
 class DatabaseTests(unittest.TestCase):
+    def test_backfill_is_chunked_resumable_and_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Database(Path(directory) / "zepp.db")
+            fake = FakeClient(fixture_responses(), {("HRVRMSSD", "real_data")})
+            first = backfill_native_metrics(fake, db, 61, chunk_days=30)
+            self.assertEqual(first["status"], "partial")
+            hrv = next(row for row in first["domains"] if row["domain"] == "hrv")
+            self.assertEqual(hrv["status"], "error")
+            self.assertEqual(hrv["chunks_completed"], 0)
+            fake.failures.clear()
+            second = backfill_native_metrics(fake, db, 61, chunk_days=30)
+            self.assertEqual(second["status"], "ok")
+            hrv = next(row for row in second["domains"] if row["domain"] == "hrv")
+            self.assertEqual(hrv["status"], "complete")
+            self.assertEqual(hrv["chunks_completed"], 3)
+            before = db.status()["record_counts"]
+            third = backfill_native_metrics(fake, db, 61, chunk_days=30)
+            self.assertEqual(third["status"], "ok")
+            after = db.status()["record_counts"]
+            self.assertEqual({k: v for k, v in after.items() if k != "sync_runs"},
+                             {k: v for k, v in before.items() if k != "sync_runs"})
+            progress = db.connection.execute(
+                "SELECT status, cursor_to_date FROM historical_sync_progress WHERE domain='hrv'"
+            ).fetchone()
+            self.assertEqual(tuple(progress), ("complete", hrv["target_from_date"]))
+            db.close()
+
     def test_initialization_schema_and_path_precedence(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "nested" / "zepp.db"

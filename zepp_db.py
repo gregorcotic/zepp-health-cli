@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 DEFAULT_DB_PATH = Path("data") / "zepp_health.db"
 _REMOVED_KEYS = {
     "app_token", "apptoken", "authorization", "cookie", "cookies",
@@ -268,6 +268,26 @@ CREATE TABLE IF NOT EXISTS lifeload_records (
 CREATE INDEX IF NOT EXISTS idx_lifeload_date ON lifeload_records(event_date);
 """
 
+SCHEMA_V3_SQL = """
+CREATE TABLE IF NOT EXISTS historical_sync_progress (
+    job_key TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    sub_type TEXT NOT NULL,
+    target_from_date TEXT NOT NULL,
+    cursor_to_date TEXT NOT NULL,
+    status TEXT NOT NULL,
+    chunks_completed INTEGER NOT NULL DEFAULT 0,
+    records_retrieved INTEGER NOT NULL DEFAULT 0,
+    inserted_count INTEGER NOT NULL DEFAULT 0,
+    updated_count INTEGER NOT NULL DEFAULT 0,
+    unchanged_count INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (job_key, domain)
+);
+"""
+
 
 class Database:
     def __init__(self, path: str | Path) -> None:
@@ -298,6 +318,13 @@ class Database:
                     "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('schema_version', '2')"
                 )
                 self.connection.execute("PRAGMA user_version = 2")
+                current = 2
+            if current < 3:
+                self.connection.executescript(SCHEMA_V3_SQL)
+                self.connection.execute(
+                    "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('schema_version', '3')"
+                )
+                self.connection.execute("PRAGMA user_version = 3")
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -320,6 +347,15 @@ class Database:
         self.connection.commit()
         return int(cur.lastrowid)
 
+    def mark_running_syncs_interrupted(self) -> int:
+        """Close stale runs left behind by a terminated process on next startup."""
+        cur = self.connection.execute(
+            "UPDATE sync_runs SET finished_at=?, status='interrupted', summary_json=? WHERE status='running'",
+            (utc_now(), json_text({"error": "process_interrupted"})),
+        )
+        self.connection.commit()
+        return int(cur.rowcount)
+
     def finish_sync(self, run_id: int, status: str, summary: dict[str, Any]) -> None:
         self.connection.execute(
             "UPDATE sync_runs SET finished_at=?, status=?, summary_json=? WHERE id=?",
@@ -339,6 +375,35 @@ class Database:
                 result.get("inserted", 0), result.get("updated", 0),
                 result.get("unchanged", 0), result.get("error"),
             ),
+        )
+        self.connection.commit()
+
+    def get_historical_progress(self, job_key: str, domain: str) -> sqlite3.Row | None:
+        return self.connection.execute(
+            "SELECT * FROM historical_sync_progress WHERE job_key=? AND domain=?",
+            (job_key, domain),
+        ).fetchone()
+
+    def save_historical_progress(self, job_key: str, result: dict[str, Any]) -> None:
+        self.connection.execute(
+            """INSERT INTO historical_sync_progress
+            (job_key, domain, event_type, sub_type, target_from_date, cursor_to_date,
+             status, chunks_completed, records_retrieved, inserted_count,
+             updated_count, unchanged_count, last_error, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(job_key, domain) DO UPDATE SET
+              cursor_to_date=excluded.cursor_to_date, status=excluded.status,
+              chunks_completed=excluded.chunks_completed,
+              records_retrieved=excluded.records_retrieved,
+              inserted_count=excluded.inserted_count,
+              updated_count=excluded.updated_count,
+              unchanged_count=excluded.unchanged_count,
+              last_error=excluded.last_error, updated_at=excluded.updated_at""",
+            (job_key, result["domain"], result["event_type"], result["sub_type"],
+             result["target_from_date"], result["cursor_to_date"], result["status"],
+             result.get("chunks_completed", 0), result.get("records_retrieved", 0),
+             result.get("inserted", 0), result.get("updated", 0),
+             result.get("unchanged", 0), result.get("error"), utc_now()),
         )
         self.connection.commit()
 

@@ -81,6 +81,31 @@ python3 zepp_health.py db-status --db /opt/zepp-health-cli/data/zepp_health.db
 The service has no HTTP listener, public API, or remote database access.
 Normal synchronization does not require sudo.
 
+## Historical backfill
+
+Use the resumable historical mode when older context is needed:
+
+```bash
+python3 zepp_health.py backfill --days 180 --json
+python3 zepp_health.py backfill --days 365 --chunk-days 30 --json
+```
+
+Backfill requests each native event domain in backwards calendar chunks. The
+cursor is committed after every successful chunk in
+`historical_sync_progress`; rerunning the same target resumes from that cursor.
+Existing logical keys keep overlapping requests idempotent. `sync-db` remains
+the incremental mode used by the systemd timer.
+
+To measure account-specific retention and API window behavior before a large
+run:
+
+```bash
+python3 zepp_health.py probe-history --probe-days 7 30 90 180 365 730 --json
+```
+
+The probe reports returned record dates, not a presumed Zepp limit. An empty
+domain is recorded as empty, while request failures remain distinguishable.
+
 The `sudo install` command is one-time directory setup; normal synchronization
 and checks run as the runtime user. Do not expose the database through a web
 server or network port. Remove a test restore only after checking its exact

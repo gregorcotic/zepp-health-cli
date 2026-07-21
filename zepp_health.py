@@ -1523,6 +1523,7 @@ def sync_native_metrics(
 ) -> dict[str, Any]:
     """Fetch and persist native domains independently, continuing after errors."""
     from_ms, to_ms = _ms_window(days)
+    database.mark_running_syncs_interrupted()
     run_id = database.start_sync(days, from_ms, to_ms)
     started = time.perf_counter()
     domains: list[dict[str, Any]] = []
@@ -1565,6 +1566,129 @@ def sync_native_metrics(
         raise
 
 
+def _utc_date_window(start_day: date, end_day_exclusive: date) -> tuple[int, int]:
+    """Convert an inclusive calendar range to a half-open UTC millisecond range."""
+    start = datetime.combine(start_day, datetime.min.time(), tzinfo=timezone.utc)
+    end = datetime.combine(end_day_exclusive, datetime.min.time(), tzinfo=timezone.utc)
+    return int(start.timestamp() * 1000), int(end.timestamp() * 1000)
+
+
+def _historical_domain_result(domain: str, event_type: str, sub_type: str, **values: Any) -> dict[str, Any]:
+    return {
+        "domain": domain, "event_type": event_type, "sub_type": sub_type,
+        "status": values.pop("status", "ok"), "target_from_date": values.pop("target_from_date"),
+        "cursor_to_date": values.pop("cursor_to_date"), **values,
+    }
+
+
+def backfill_native_metrics(
+    client: ZeppClient,
+    database: Database,
+    days: int,
+    *,
+    limit: int = 2000,
+    chunk_days: int = 30,
+) -> dict[str, Any]:
+    """Fetch native domains in resumable, backwards calendar chunks.
+
+    The events API has no documented cursor in the response, so date ranges are
+    the safe cursor. Each chunk is committed independently and logical keys make
+    overlapping/repeated requests idempotent.
+    """
+    if days < 1 or chunk_days < 1:
+        raise ValueError("days and chunk_days must be positive")
+    today = _today_utc()
+    target_from = today - timedelta(days=days - 1)
+    target_from_text = target_from.isoformat()
+    job_key = f"backfill:{target_from_text}"
+    run_from, run_to = _utc_date_window(target_from, today + timedelta(days=1))
+    database.mark_running_syncs_interrupted()
+    run_id = database.start_sync(days, run_from, run_to)
+    started = time.perf_counter()
+    domains: list[dict[str, Any]] = []
+    try:
+        for domain, event_type, sub_type, normalizer in SYNC_DOMAIN_SPECS:
+            progress = database.get_historical_progress(job_key, domain)
+            cursor_to = date.fromisoformat(progress["cursor_to_date"]) if progress else today + timedelta(days=1)
+            totals = {
+                "records_retrieved": int(progress["records_retrieved"]) if progress else 0,
+                "inserted": int(progress["inserted_count"]) if progress else 0,
+                "updated": int(progress["updated_count"]) if progress else 0,
+                "unchanged": int(progress["unchanged_count"]) if progress else 0,
+                "chunks_completed": int(progress["chunks_completed"]) if progress else 0,
+            }
+            if progress and progress["status"] == "complete":
+                domains.append(_historical_domain_result(domain, event_type, sub_type, status="complete",
+                    target_from_date=target_from_text, cursor_to_date=cursor_to.isoformat(), **totals))
+                continue
+            status = "complete"
+            error = None
+            while cursor_to > target_from:
+                chunk_from = max(target_from, cursor_to - timedelta(days=chunk_days))
+                from_ms, to_ms = _utc_date_window(chunk_from, cursor_to)
+                try:
+                    payload = client.events(event_type, sub_type, from_ms, to_ms, limit=limit, reverse=True)
+                    rows = normalizer(payload)
+                    counts = database.store_domain_with_raw(domain, event_type, sub_type, payload, from_ms, to_ms, rows)
+                    cursor_to = chunk_from
+                    totals["records_retrieved"] += len(rows)
+                    totals["chunks_completed"] += 1
+                    for key in ("inserted", "updated", "unchanged"):
+                        totals[key] += counts[key]
+                    database.save_historical_progress(job_key, _historical_domain_result(
+                        domain, event_type, sub_type, status="running", target_from_date=target_from_text,
+                        cursor_to_date=cursor_to.isoformat(), **totals))
+                except Exception as exc:
+                    status = "error"
+                    error = type(exc).__name__
+                    database.save_historical_progress(job_key, _historical_domain_result(
+                        domain, event_type, sub_type, status=status, target_from_date=target_from_text,
+                        cursor_to_date=cursor_to.isoformat(), error=error, **totals))
+                    break
+            if status != "error":
+                database.save_historical_progress(job_key, _historical_domain_result(
+                    domain, event_type, sub_type, status="complete", target_from_date=target_from_text,
+                    cursor_to_date=target_from_text, **totals))
+            domains.append(_historical_domain_result(domain, event_type, sub_type, status=status,
+                target_from_date=target_from_text, cursor_to_date=cursor_to.isoformat(), error=error, **totals))
+            database.record_sync_domain(run_id, {
+                **domains[-1], "status": status, "inserted": totals["inserted"],
+                "updated": totals["updated"], "unchanged": totals["unchanged"],
+            })
+        status = "ok" if not any(row["status"] == "error" for row in domains) else "partial"
+        summary = {"requested_days": days, "from_ms": run_from, "to_ms": run_to,
+                   "database_path": str(database.path), "job_key": job_key, "chunk_days": chunk_days,
+                   "domains": domains, "duration_seconds": round(time.perf_counter() - started, 3)}
+        database.finish_sync(run_id, status, summary)
+        return {"sync_run_id": run_id, "status": status, **summary}
+    except Exception:
+        database.finish_sync(run_id, "error", {"error": "backfill_orchestration_error", "job_key": job_key})
+        raise
+
+
+def probe_historical_domains(client: ZeppClient, days_list: list[int], *, limit: int = 2000) -> list[dict[str, Any]]:
+    """Measure response coverage at several ranges without claiming a server limit."""
+    today = _today_utc()
+    output: list[dict[str, Any]] = []
+    for domain, event_type, sub_type, normalizer in SYNC_DOMAIN_SPECS:
+        for days in days_list:
+            start = today - timedelta(days=days - 1)
+            from_ms, to_ms = _utc_date_window(start, today + timedelta(days=1))
+            item: dict[str, Any] = {"domain": domain, "event_type": event_type, "sub_type": sub_type,
+                                    "requested_days": days, "from_date": start.isoformat(), "to_date": today.isoformat()}
+            try:
+                payload = client.events(event_type, sub_type, from_ms, to_ms, limit=limit, reverse=True)
+                rows = normalizer(payload)
+                dates = sorted({str(row["date"]) for row in rows if row.get("date")})
+                item.update({"status": "nonempty" if rows else "empty", "records": len(rows),
+                             "earliest_date": dates[0] if dates else None, "latest_date": dates[-1] if dates else None,
+                             "response_keys": sorted(payload.keys()) if isinstance(payload, dict) else None})
+            except Exception as exc:
+                item.update({"status": "error", "error": type(exc).__name__})
+            output.append(item)
+    return output
+
+
 def _db_path_from_args(args: argparse.Namespace) -> Path:
     return resolve_db_path(getattr(args, "db_path", None), load_config())
 
@@ -1601,6 +1725,37 @@ def cmd_sync_db(args: argparse.Namespace) -> None:
             + (f" error={domain['error']}" if domain.get("error") else "")
         )
     print(f"Duration: {result['duration_seconds']:.3f}s")
+
+
+def cmd_backfill(args: argparse.Namespace) -> None:
+    lock = SyncLock(args.lock_path) if getattr(args, "lock_path", None) else None
+    if lock is not None and not lock.acquire(nonblocking=True):
+        result = {"status": "skipped", "reason": "lock_held", "lock_path": str(args.lock_path)}
+        _emit_json(result, args) if args.json else print(f"Backfill skipped: lock held ({args.lock_path})")
+        return
+    database: Database | None = None
+    try:
+        database = Database(_db_path_from_args(args))
+        result = backfill_native_metrics(_load_client(), database, args.days, limit=args.limit, chunk_days=args.chunk_days)
+    finally:
+        if database is not None:
+            database.close()
+        if lock is not None:
+            lock.release()
+    if args.json:
+        _emit_json(result, args)
+        return
+    print(f"Historical synchronization: {result['status']} ({result['requested_days']} days)")
+    for domain in result["domains"]:
+        print(f"  {domain['domain']}: {domain['status']} chunks={domain['chunks_completed']} "
+              f"retrieved={domain['records_retrieved']} inserted={domain['inserted']} "
+              f"updated={domain['updated']} unchanged={domain['unchanged']}"
+              + (f" error={domain['error']}" if domain.get("error") else ""))
+
+
+def cmd_probe_history(args: argparse.Namespace) -> None:
+    result = probe_historical_domains(_load_client(), args.probe_days, limit=args.limit)
+    _emit_json(result, args)
 
 
 def cmd_db_status(args: argparse.Namespace) -> None:
@@ -2052,6 +2207,22 @@ def main() -> None:
     sp.add_argument("--limit", type=int, default=2000)
     sp.add_argument("--lock-path", help="Advisory lock path for unattended synchronization")
     sp.set_defaults(func=cmd_sync_db)
+
+    sp = sub.add_parser("backfill", help="Resumable backwards historical synchronization")
+    sp.add_argument("--days", type=int, required=True, help="Historical calendar days to request")
+    _add_json(sp)
+    _add_db(sp)
+    sp.add_argument("--limit", type=int, default=2000)
+    sp.add_argument("--chunk-days", type=int, default=30, help="Calendar days per API request (default 30)")
+    sp.add_argument("--lock-path", help="Advisory lock path for unattended synchronization")
+    sp.set_defaults(func=cmd_backfill)
+
+    sp = sub.add_parser("probe-history", help="Probe historical coverage and date-window behavior")
+    _add_json(sp)
+    sp.add_argument("--probe-days", type=int, nargs="+", default=[7, 30, 90, 180, 365, 730],
+                    help="Requested ranges to compare (default: 7 30 90 180 365 730)")
+    sp.add_argument("--limit", type=int, default=2000)
+    sp.set_defaults(func=cmd_probe_history)
 
     sp = sub.add_parser("db-status", help="Inspect local Zepp SQLite database")
     _add_json(sp)
