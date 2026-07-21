@@ -18,3 +18,20 @@ performed on the MacBook account and must not expose credentials.
 
 - B004: SQLite persistence for native Zepp health data (`677181b`).
 - B003: daily-status/readiness and native metric consolidation (see Git history).
+
+## B006 — Production automation
+
+Problem: validated SQLite synchronization still required manual operation on
+Ubuntu.
+
+Root cause: no unattended schedule, process lock, or machine-readable health
+status existed.
+
+Solution: added a six-hour systemd timer and oneshot service template, a
+`flock`-based wrapper, `sync-health` with documented exit codes, and journal-
+focused operational procedures. Credentials remain outside units and logs.
+
+Lessons learned: systemd service templates must name the runtime account
+explicitly; this repository therefore requires installation-time replacement
+of safe user/group placeholders. Kernel advisory locks are preferable to
+timestamp-only lock files because terminated processes release them.

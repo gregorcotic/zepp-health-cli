@@ -1,0 +1,10 @@
+[Unit]
+Description=Run native Zepp synchronization every six hours
+
+[Timer]
+OnCalendar=*-*-* 00/6:00:00
+Persistent=true
+Unit=zepp-health-sync.service
+
+[Install]
+WantedBy=timers.target

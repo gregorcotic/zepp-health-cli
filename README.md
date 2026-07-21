@@ -141,12 +141,17 @@ python3 zepp_health.py daily-status --days 14 --from-db
 python3 zepp_health.py db-check
 python3 zepp_health.py db-backup --output backups/zepp_health_$(date +%Y-%m-%d).db
 python3 zepp_health.py db-restore --input backups/zepp_health_YYYY-MM-DD.db --db restore-test/zepp_health.db
+python3 zepp_health.py sync-health
+python3 zepp_health.py sync-health --json
 
 # Inspect / manage config
 python3 zepp_health.py config --show          # token shown masked
 python3 zepp_health.py config --path          # which paths are searched
 python3 zepp_health.py --config /tmp/other.json temperature
 ```
+
+For Ubuntu systemd installation, locking, monitoring, journal logs, and
+backup operations, see [docs/operations.md](docs/operations.md).
 
 `--days N` works either before or after the subcommand (e.g. both `--days 7 heart-rate` and `heart-rate --days 7` are accepted).
 

@@ -1,0 +1,30 @@
+#!/bin/sh
+set -eu
+
+PROJECT_DIR=${ZEPP_PROJECT_DIR:-/opt/zepp-health-cli}
+PYTHON=${ZEPP_PYTHON:-$PROJECT_DIR/.venv/bin/python}
+DATABASE=${ZEPP_DB_PATH:-$PROJECT_DIR/data/zepp_health.db}
+LOCK_PATH=${ZEPP_SYNC_LOCK:-$PROJECT_DIR/run/zepp-health-sync.lock}
+DAYS=${ZEPP_SYNC_DAYS:-7}
+
+if ! command -v flock >/dev/null 2>&1; then
+    echo "zepp-health-sync failed: flock is required" >&2
+    exit 3
+fi
+
+mkdir -p "$(dirname "$LOCK_PATH")"
+exec 9>"$LOCK_PATH"
+if ! flock -n 9; then
+    echo "zepp-health-sync skipped: lock held path=$LOCK_PATH"
+    exit 0
+fi
+
+started=$(date +%s)
+echo "zepp-health-sync started database=$DATABASE days=$DAYS"
+set +e
+"$PYTHON" "$PROJECT_DIR/zepp_health.py" sync-db --days "$DAYS" --db "$DATABASE"
+status=$?
+set -e
+finished=$(date +%s)
+echo "zepp-health-sync finished status=$status duration_seconds=$((finished - started)) database=$DATABASE"
+exit "$status"

@@ -76,6 +76,12 @@ python3 zepp_health.py db-status --db /opt/zepp-health-cli/data/zepp_health.db
 
 `git pull` does not overwrite ignored local database files.
 
+For unattended Ubuntu synchronization, see [docs/operations.md](operations.md).
+The `sync-health` command reports database integrity, synchronization age,
+latest run state, lock state, and duration. It returns 0 for healthy, 1 for a
+warning, 2 for a failed synchronization/database state, and 3 for a
+configuration or database access error.
+
 ## Integrity, backup, and restore
 
 Run checks without contacting Zepp:

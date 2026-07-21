@@ -1,0 +1,20 @@
+[Unit]
+Description=Synchronize native Zepp data into SQLite
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Replace both placeholders with the existing Ubuntu runtime user/group.
+User=__ZEPP_RUNTIME_USER__
+Group=__ZEPP_RUNTIME_GROUP__
+WorkingDirectory=/opt/zepp-health-cli
+ExecStart=/opt/zepp-health-cli/scripts/zepp-health-sync
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/zepp-health-cli/data /opt/zepp-health-cli/run /opt/zepp-health-cli/logs
+
+[Install]
+WantedBy=multi-user.target

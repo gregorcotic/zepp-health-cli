@@ -31,6 +31,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 from zepp_db import Database, backup_database, inspect_database_file, resolve_db_path, restore_database
+from zepp_ops import SyncLock, lock_is_held
 
 DEFAULT_HOST = "api-mifit-us3.zepp.com"
 
@@ -1569,11 +1570,23 @@ def _db_path_from_args(args: argparse.Namespace) -> Path:
 
 
 def cmd_sync_db(args: argparse.Namespace) -> None:
-    database = Database(_db_path_from_args(args))
+    lock = SyncLock(args.lock_path) if getattr(args, "lock_path", None) else None
+    if lock is not None and not lock.acquire(nonblocking=True):
+        message = {"status": "skipped", "reason": "lock_held", "lock_path": str(args.lock_path)}
+        if args.json:
+            _emit_json(message, args)
+        else:
+            print(f"Synchronization skipped: lock held ({args.lock_path})")
+        return
+    database: Database | None = None
     try:
+        database = Database(_db_path_from_args(args))
         result = sync_native_metrics(_load_client(), database, args.days, limit=args.limit)
     finally:
-        database.close()
+        if database is not None:
+            database.close()
+        if lock is not None:
+            lock.release()
     if args.json:
         _emit_json(result, args)
         return
@@ -1659,6 +1672,80 @@ def cmd_db_restore(args: argparse.Namespace) -> None:
     print(f"Schema version: {result['schema_version']}")
     print(f"Integrity: {result['integrity_check']}")
     print(f"Counts match: {result['counts_match']}")
+
+
+def cmd_sync_health(args: argparse.Namespace) -> None:
+    try:
+        info = inspect_database_file(_db_path_from_args(args))
+        connection = sqlite3.connect(_db_path_from_args(args), timeout=30.0)
+        try:
+            successful = connection.execute(
+                "SELECT finished_at FROM sync_runs WHERE status='ok' AND finished_at IS NOT NULL ORDER BY finished_at DESC LIMIT 1"
+            ).fetchone()
+            failed = connection.execute(
+                "SELECT finished_at, status FROM sync_runs WHERE status != 'ok' AND finished_at IS NOT NULL ORDER BY finished_at DESC LIMIT 1"
+            ).fetchone()
+            latest = connection.execute(
+                "SELECT finished_at, status, summary_json FROM sync_runs WHERE finished_at IS NOT NULL ORDER BY finished_at DESC LIMIT 1"
+            ).fetchone()
+        finally:
+            connection.close()
+        now = datetime.now(timezone.utc)
+        last_success_at = successful[0] if successful else None
+        age_seconds = None
+        if last_success_at:
+            age_seconds = max(0.0, (now - datetime.fromisoformat(last_success_at).astimezone(timezone.utc)).total_seconds())
+        lock_path = Path(args.lock_path or "run/zepp-health-sync.lock")
+        held = lock_is_held(lock_path)
+        duration = None
+        if latest and latest[2]:
+            try:
+                duration = json.loads(latest[2]).get("duration_seconds")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                duration = None
+        result = {
+            "database_path": info["database_path"],
+            "schema_version": info["schema_version"],
+            "integrity_status": info["integrity_check"],
+            "foreign_key_status": "ok" if not info["foreign_key_check"] else "violations",
+            "latest_sync": {"finished_at": latest[0], "status": latest[1]} if latest else None,
+            "latest_successful_sync": last_success_at,
+            "latest_failed_sync": {"finished_at": failed[0], "status": failed[1]} if failed else None,
+            "last_success_age_seconds": age_seconds,
+            "lock_path": str(lock_path),
+            "lock_held": held,
+            "database_size_bytes": info["database_size_bytes"],
+            "last_sync_duration_seconds": duration,
+        }
+        if info["integrity_check"] != "ok" or info["foreign_key_check"]:
+            exit_code = 2
+        elif not successful:
+            exit_code = 2
+        elif age_seconds is not None and age_seconds > 12 * 3600:
+            exit_code = 1
+        elif latest and latest[1] != "ok":
+            exit_code = 1
+        else:
+            exit_code = 0
+    except (OSError, sqlite3.DatabaseError, ValueError, RuntimeError) as exc:
+        if args.json:
+            _emit_json({"status": "configuration_or_database_error", "error": type(exc).__name__}, args)
+        else:
+            print(f"Sync health: configuration/database error ({type(exc).__name__})")
+        raise SystemExit(3) from None
+    result["status"] = "healthy" if exit_code == 0 else "warning" if exit_code == 1 else "failed"
+    if args.json:
+        _emit_json(result, args)
+    else:
+        print(f"Sync health: {result['status']}")
+        print(f"Database: {result['database_path']}")
+        print(f"Integrity: {result['integrity_status']}")
+        print(f"Latest successful sync: {result['latest_successful_sync'] or '—'}")
+        print(f"Last success age: {result['last_success_age_seconds'] if result['last_success_age_seconds'] is not None else '—'} seconds")
+        print(f"Lock held: {result['lock_held']} ({result['lock_path']})")
+        print(f"Last duration: {result['last_sync_duration_seconds'] if result['last_sync_duration_seconds'] is not None else '—'} seconds")
+    if exit_code:
+        raise SystemExit(exit_code)
 
 
 def cmd_temperature(args: argparse.Namespace) -> None:
@@ -1963,6 +2050,7 @@ def main() -> None:
     _add_json(sp)
     _add_db(sp)
     sp.add_argument("--limit", type=int, default=2000)
+    sp.add_argument("--lock-path", help="Advisory lock path for unattended synchronization")
     sp.set_defaults(func=cmd_sync_db)
 
     sp = sub.add_parser("db-status", help="Inspect local Zepp SQLite database")
@@ -1988,6 +2076,12 @@ def main() -> None:
     sp.add_argument("--input", required=True, help="SQLite backup file path")
     sp.add_argument("--overwrite", action="store_true", help="Replace an existing target explicitly")
     sp.set_defaults(func=cmd_db_restore)
+
+    sp = sub.add_parser("sync-health", help="Report synchronization and database health")
+    _add_json(sp)
+    _add_db(sp)
+    sp.add_argument("--lock-path", help="Lock path to inspect (default run/zepp-health-sync.lock)")
+    sp.set_defaults(func=cmd_sync_health)
 
     sp = sub.add_parser("readiness", help="Zepp readiness/watch_score values")
     _add_days(sp)

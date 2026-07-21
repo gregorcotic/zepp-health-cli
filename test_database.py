@@ -6,6 +6,9 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+import configparser
+import subprocess
+import sys
 
 import requests
 
@@ -18,6 +21,7 @@ from zepp_db import (
     restore_database,
 )
 from zepp_health import sync_native_metrics
+from zepp_ops import SyncLock, lock_is_held
 
 
 class FakeClient:
@@ -187,6 +191,47 @@ class DatabaseTests(unittest.TestCase):
                 inspect_database_file(corrupt)
             with self.assertRaises(sqlite3.DatabaseError):
                 backup_database(corrupt, Path(directory) / "copy.db")
+
+    def test_lock_blocks_second_holder_and_releases(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "run" / "sync.lock"
+            first = SyncLock(path)
+            second = SyncLock(path)
+            self.assertTrue(first.acquire())
+            self.assertTrue(lock_is_held(path))
+            self.assertFalse(second.acquire())
+            first.release()
+            self.assertFalse(lock_is_held(path))
+
+    def test_sync_health_json_exit_codes_and_systemd_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "health.db"
+            db = Database(path)
+            db.close()
+            command = [sys.executable, "zepp_health.py", "sync-health", "--db", str(path), "--json"]
+            failed = subprocess.run(command, capture_output=True, text=True)
+            self.assertEqual(failed.returncode, 2)
+            self.assertEqual(json.loads(failed.stdout)["status"], "failed")
+            db = Database(path)
+            run_id = db.start_sync(1, 1, 2)
+            db.finish_sync(run_id, "ok", {"duration_seconds": 0.25})
+            db.close()
+            healthy = subprocess.run(command, capture_output=True, text=True)
+            self.assertEqual(healthy.returncode, 0)
+            self.assertEqual(json.loads(healthy.stdout)["status"], "healthy")
+
+        for filename, expected in (
+            ("deploy/systemd/zepp-health-sync.service", {"Type": "oneshot", "Persistent": None}),
+            ("deploy/systemd/zepp-health-sync.timer", {"Persistent": "true"}),
+        ):
+            parser = configparser.ConfigParser(strict=False)
+            parser.optionxform = str
+            parser.read(filename)
+            if filename.endswith(".service"):
+                self.assertEqual(parser["Service"]["Type"], expected["Type"])
+                self.assertIn("__ZEPP_RUNTIME_USER__", parser["Service"]["User"])
+            else:
+                self.assertEqual(parser["Timer"]["Persistent"], expected["Persistent"])
 
 
 if __name__ == "__main__":

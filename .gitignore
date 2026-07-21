@@ -3,6 +3,8 @@ config.json
 
 # Local SQLite data — never commit runtime health data
 data/
+run/
+logs/
 backups/
 restore-test/
 *.db
