@@ -12,9 +12,10 @@ import os
 import sqlite3
 import tempfile
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
+from zoneinfo import ZoneInfo
 
 
 SCHEMA_VERSION = 3
@@ -23,6 +24,22 @@ _REMOVED_KEYS = {
     "app_token", "apptoken", "authorization", "cookie", "cookies",
     "user_id", "userid", "uid", "token", "access_token", "refresh_token",
 }
+FRESHNESS_TIMEZONE = "Europe/Ljubljana"
+MORNING_EXPECTED_AFTER = time(6, 30)
+FRESHNESS_DOMAINS = {
+    "sleep": None,
+    "hrv": "hrv_samples",
+    "readiness": "readiness_records",
+    "sleep_related_readiness": "sleep_related_readiness",
+    "wake_energy": "wake_energy",
+    "exertion": "exertion_records",
+}
+MORNING_RECOVERY_DOMAINS = (
+    "hrv",
+    "readiness",
+    "sleep_related_readiness",
+    "wake_energy",
+)
 
 
 def utc_now() -> str:
@@ -510,6 +527,91 @@ class Database:
             "date_range": {"from": min(dates) if dates else None, "to": max(dates) if dates else None},
             "record_counts": counts,
             "latest_sync_at": latest,
+        }
+
+    def factual_freshness(
+        self,
+        now: datetime | None = None,
+        timezone_name: str = FRESHNESS_TIMEZONE,
+    ) -> dict[str, Any]:
+        """Report synchronization and domain dates without interpreting health."""
+        local_zone = ZoneInfo(timezone_name)
+        instant = now or datetime.now(timezone.utc)
+        if instant.tzinfo is None:
+            raise ValueError("now must be timezone-aware")
+        local_now = instant.astimezone(local_zone)
+        today = local_now.date().isoformat()
+        yesterday = (local_now.date() - timedelta(days=1)).isoformat()
+
+        latest_success = self.connection.execute(
+            "SELECT finished_at FROM sync_runs "
+            "WHERE status='ok' AND finished_at IS NOT NULL "
+            "ORDER BY finished_at DESC LIMIT 1"
+        ).fetchone()
+        latest_success_at = latest_success[0] if latest_success else None
+        latest_success_local_date = None
+        if latest_success_at:
+            parsed = datetime.fromisoformat(str(latest_success_at))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            latest_success_local_date = parsed.astimezone(local_zone).date().isoformat()
+
+        domains: dict[str, dict[str, Any]] = {}
+        for name, table_name in FRESHNESS_DOMAINS.items():
+            if table_name is None:
+                domains[name] = {
+                    "supported": False,
+                    "latest_date": None,
+                    "coverage": "unavailable",
+                }
+                continue
+            latest_date = self.connection.execute(
+                f"SELECT MAX(event_date) FROM {table_name} WHERE event_date IS NOT NULL"
+            ).fetchone()[0]
+            if latest_date == today:
+                coverage = "today"
+            elif latest_date == yesterday:
+                coverage = "yesterday"
+            elif latest_date is None:
+                coverage = "unavailable"
+            else:
+                coverage = "other"
+            domains[name] = {
+                "supported": True,
+                "latest_date": latest_date,
+                "coverage": coverage,
+            }
+
+        recovery = [domains[name] for name in MORNING_RECOVERY_DOMAINS]
+        available = [item for item in recovery if item["latest_date"] is not None]
+        today_count = sum(item["latest_date"] == today for item in recovery)
+        if not available:
+            morning_status = "unavailable"
+        elif today_count == len(recovery):
+            morning_status = "complete"
+        elif today_count:
+            morning_status = "partial"
+        else:
+            morning_status = "pending"
+
+        return {
+            "timezone": timezone_name,
+            "as_of": local_now.isoformat(),
+            "today": today,
+            "yesterday": yesterday,
+            "morning_expectation": (
+                "before_first_morning_sync"
+                if local_now.timetz().replace(tzinfo=None) < MORNING_EXPECTED_AFTER
+                else "morning_sync_expected"
+            ),
+            "sync_freshness": {
+                "latest_successful_sync": latest_success_at,
+                "latest_successful_sync_local_date": latest_success_local_date,
+                "synchronized_today": latest_success_local_date == today,
+            },
+            "domain_data_freshness": domains,
+            "morning_recovery_domains": list(MORNING_RECOVERY_DOMAINS),
+            "morning_data_status": morning_status,
         }
 
     def read_daily_status(self, from_date: str, to_date: str) -> list[dict[str, Any]]:

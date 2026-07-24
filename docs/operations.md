@@ -40,32 +40,131 @@ python3 zepp_health.py db-restore --input /opt/zepp-health-cli/backups/zepp_heal
 
 ### Systemd installation
 
-The repository contains `deploy/systemd/zepp-health-sync.service` and
-`deploy/systemd/zepp-health-sync.timer`. The service is shipped with
-`__ZEPP_RUNTIME_USER__` and `__ZEPP_RUNTIME_GROUP__` placeholders so it
-cannot accidentally run as an unknown or privileged account. Replace them
-with the existing runtime account during installation:
+The repository contract is `zepp-health-sync.service`,
+`zepp-health-sync.timer`, command
+`/opt/zepp-health-cli/scripts/zepp-health-sync`, and working directory
+`/opt/zepp-health-cli`. The shipped service has no `EnvironmentFile` and uses
+installation placeholders for its user/group. The exact live Ubuntu account
+and overrides are not recorded here. Before C019, the repository timer used
+`OnCalendar=*-*-* 00/6:00:00` (00:00, 06:00, 12:00, and 18:00 in the system
+timezone). Discover the live contract before deployment:
 
 ```bash
-cd /opt/zepp-health-cli
-install -d -m 750 run logs backups
-sed -e "s/__ZEPP_RUNTIME_USER__/$(id -un)/g" \
-    -e "s/__ZEPP_RUNTIME_GROUP__/$(id -gn)/g" \
-    deploy/systemd/zepp-health-sync.service \
-    | sudo tee /etc/systemd/system/zepp-health-sync.service >/dev/null
-sudo install -m 644 deploy/systemd/zepp-health-sync.timer /etc/systemd/system/zepp-health-sync.timer
-sudo systemctl daemon-reload
-sudo systemctl enable zepp-health-sync.timer
-sudo systemctl start zepp-health-sync.timer
-systemctl list-timers zepp-health-sync.timer
+systemctl cat zepp-health-sync.service
+systemctl cat zepp-health-sync.timer
+systemctl show zepp-health-sync.service \
+  -p FragmentPath -p DropInPaths -p User -p Group -p WorkingDirectory \
+  -p ExecStart -p EnvironmentFiles
+systemctl status zepp-health-sync.timer
+systemctl list-timers --all | grep -i zepp
 ```
 
-The timer is not enabled by this repository or automated tests. It runs the
-oneshot service every six hours with `Persistent=true`. The service invokes
-the existing virtual-environment interpreter and synchronizes seven days.
-The wrapper uses `flock` on `/opt/zepp-health-cli/run/zepp-health-sync.lock`;
-the kernel releases the lock if a process dies, so a stale lock file does not
-block future runs. Concurrent runs log a skip and exit successfully.
+C019 uses one persistent timer at exactly 02:00, 06:30, 08:30, 12:00, 18:00,
+and 22:00 in `Europe/Ljubljana`. The two morning runs cover weekday wake time,
+weekends, and delayed Zepp calculations; the others provide overnight
+redundancy, midday catch-up, daytime exertion, and late-day coverage. This is
+intentionally not hourly polling.
+
+### Existing context generator and success chaining
+
+C019 does not duplicate the context generator. Production is expected to have
+`coach-context-generate.service` and the independent fallback
+`coach-context-generate.timer`, but their definitions and output path are not
+in this repository. Confirm the actual contract:
+
+```bash
+systemctl cat coach-context-generate.service
+systemctl cat coach-context-generate.timer
+systemctl show coach-context-generate.service \
+  -p FragmentPath -p DropInPaths -p User -p Group -p WorkingDirectory \
+  -p ExecStart -p EnvironmentFiles
+systemctl is-enabled coach-context-generate.timer
+systemctl list-timers --all coach-context-generate.timer
+```
+
+The shipped service drop-in uses
+`OnSuccess=coach-context-generate.service`. Systemd starts it only after the
+Zepp oneshot succeeds; failure leaves the last context available. The existing
+context timer must remain enabled. Confirm syntax support before installation:
+
+```bash
+systemd --version
+systemd-analyze verify \
+  /opt/zepp-health-cli/deploy/systemd/zepp-health-sync.service \
+  /opt/zepp-health-cli/deploy/systemd/zepp-health-sync.timer
+systemd-analyze calendar '*-*-* 06:30:00 Europe/Ljubljana'
+```
+
+### C019 standalone deployment runbook
+
+Do not replace the service template blindly: preserve the discovered live
+user, group, environment, hardening, and overrides.
+
+```bash
+# After the reviewed standalone commit is pushed:
+cd /opt/zepp-health-cli
+git status --short
+git pull --ff-only origin main
+
+# Repeat discovery, then back up exact live unit files.
+systemctl cat zepp-health-sync.service
+systemctl cat zepp-health-sync.timer
+systemctl cat coach-context-generate.service
+systemctl cat coach-context-generate.timer
+sudo install -d -m 700 /root/zepp-systemd-backup
+sudo cp --archive /etc/systemd/system/zepp-health-sync.service \
+  /etc/systemd/system/zepp-health-sync.timer /root/zepp-systemd-backup/
+
+# Install the reviewed timer and additive success drop-in only.
+sudo install -m 644 deploy/systemd/zepp-health-sync.timer \
+  /etc/systemd/system/zepp-health-sync.timer
+sudo install -d -m 755 /etc/systemd/system/zepp-health-sync.service.d
+sudo install -m 644 \
+  deploy/systemd/zepp-health-sync.service.d/10-context-on-success.conf \
+  /etc/systemd/system/zepp-health-sync.service.d/10-context-on-success.conf
+sudo systemctl daemon-reload
+sudo systemctl enable --now zepp-health-sync.timer
+systemctl cat zepp-health-sync.timer
+systemctl cat zepp-health-sync.service
+systemctl status zepp-health-sync.timer
+systemctl list-timers --all | grep -i zepp
+```
+
+If discovery reports a different `FragmentPath`, back up and follow the live
+installation policy rather than creating a parallel unit. If required systemd
+syntax is unsupported, stop for a version-compatible declarative review; do
+not add shell callbacks.
+
+### Production validation
+
+Record the confirmed `general-context.json` path and its mtime, then at a
+low-risk time run:
+
+```bash
+systemctl show zepp-health-sync.service -p OnSuccess
+systemctl is-enabled coach-context-generate.timer
+sudo systemctl start zepp-health-sync.service
+systemctl status zepp-health-sync.service
+journalctl -u zepp-health-sync.service --since '15 minutes ago'
+journalctl -u coach-context-generate.service --since '15 minutes ago'
+cd /opt/zepp-health-cli
+.venv/bin/python zepp_health.py sync-health \
+  --db /opt/zepp-health-cli/data/zepp_health.db \
+  --lock-path /opt/zepp-health-cli/run/zepp-health-sync.lock --json
+stat /CONFIRMED/PATH/general-context.json
+```
+
+Verify sync success precedes the generator run and context mtime. Then use the
+existing gateway/Custom GPT path to confirm the new package and factual domain
+dates. Do not infer complete morning data from a recent sync alone. Validate
+failure isolation in staging/test: a non-zero Zepp result must not invoke the
+success trigger; the last context, gateway, Strava, and fallback context timer
+must remain available.
+
+The wrapper uses `flock` on
+`/opt/zepp-health-cli/run/zepp-health-sync.lock`; the kernel releases the lock
+if a process dies. Concurrent scheduled runs log a skip and exit 75 so the
+post-success context trigger does not run without a synchronization.
 
 Systemd sends wrapper and CLI output to the journal:
 
@@ -80,6 +179,32 @@ python3 zepp_health.py db-status --db /opt/zepp-health-cli/data/zepp_health.db
 
 The service has no HTTP listener, public API, or remote database access.
 Normal synchronization does not require sudo.
+
+### Coach-platform mirroring after standalone validation
+
+Do not migrate production while applying C019. After the standalone commit is
+deployed and its real schedules are observed:
+
+1. Copy the logical changes from `zepp_db.py`, `zepp_health.py`,
+   `scripts/zepp-health-sync`, `deploy/systemd/zepp-health-sync.timer`, the
+   success drop-in, tests, and documentation to
+   `coach-platform/apps/zepp-health-cli`, adapting paths only where the
+   monorepo layout requires it.
+2. In `coach-platform/apps/coach-data-bridge`, extend the existing context
+   generator (do not create another) to read the Zepp factual freshness and
+   place it in `general-context.json` without renaming actual domains. Preserve
+   `sync_freshness`, `domain_data_freshness`, `morning_data_status`, timezone,
+   as-of time, and morning expectation as factual metadata.
+3. Add bridge fixtures for complete, partial, pending, unavailable, and
+   pre-06:30/DST-local dates. Missing today's data must not fail context
+   generation.
+4. Run each owning app's tests and the monorepo `test-all`. Record the
+   standalone and monorepo commit IDs together to prevent divergence.
+
+This bridge follow-up is required because the Custom GPT consumes
+`general-context.json`; changing only the Zepp database cannot expose the new
+facts through the gateway. Resume C017.3 after this mirror passes. C018 remains
+planned and out of C019 scope.
 
 ## Historical backfill
 

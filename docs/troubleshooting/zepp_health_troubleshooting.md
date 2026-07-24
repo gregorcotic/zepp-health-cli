@@ -12,10 +12,33 @@ For scheduled operation, inspect `systemctl status zepp-health-sync.service`,
 automation-friendly result. Exit code 1 means warning, 2 means failed health
 state, and 3 means configuration/database error.
 
+For C019 scheduling/context issues, also inspect:
+
+```bash
+systemctl cat zepp-health-sync.service
+systemctl cat zepp-health-sync.timer
+systemctl show zepp-health-sync.service -p OnSuccess -p ExecMainStatus
+journalctl -u coach-context-generate.service
+systemctl list-timers --all coach-context-generate.timer
+```
+
+A recent successful sync with `morning_data_status=pending` is valid: sync
+freshness is current while every stored recovery domain still ends before
+today. `partial` means at least one, but not every, supported recovery domain
+contains today. Zepp domains arriving at different times is expected. Before
+06:30 Europe/Ljubljana, `morning_expectation=before_first_morning_sync` avoids
+claiming a stale/error state.
+
+On Zepp failure, `OnSuccess` must not invoke the generator. Do not touch
+`general-context.json` to make it look fresh. Preserve the last valid file,
+leave `coach-context-generate.timer` enabled, and diagnose Zepp independently
+from the gateway and Strava.
+
 If a run is skipped, the journal says that the `flock` lock is held. The lock
 is kernel-owned and is released when the owning process exits; do not delete a
 lock file while synchronization may still be running. Check the process and
-journal first.
+journal first. The scheduled wrapper exits 75 for this no-op so systemd does
+not treat it as a successful sync or invoke the context generator.
 
 ## SQLite files
 

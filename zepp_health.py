@@ -1550,7 +1550,8 @@ def sync_native_metrics(
                 )
             domains.append(result)
             database.record_sync_domain(run_id, result)
-        status = "ok" if not any(row["status"] == "error" for row in domains) else "partial"
+        error_count = sum(row["status"] == "error" for row in domains)
+        status = "error" if error_count == len(domains) else "partial" if error_count else "ok"
         summary = {
             "requested_days": days,
             "from_ms": from_ms,
@@ -1713,6 +1714,8 @@ def cmd_sync_db(args: argparse.Namespace) -> None:
             lock.release()
     if args.json:
         _emit_json(result, args)
+        if result["status"] == "error":
+            raise SystemExit(2)
         return
     print(f"SQLite synchronization: {result['status']}")
     print(f"Database: {result['database_path']}")
@@ -1725,6 +1728,8 @@ def cmd_sync_db(args: argparse.Namespace) -> None:
             + (f" error={domain['error']}" if domain.get("error") else "")
         )
     print(f"Duration: {result['duration_seconds']:.3f}s")
+    if result["status"] == "error":
+        raise SystemExit(2)
 
 
 def cmd_backfill(args: argparse.Namespace) -> None:
@@ -1872,6 +1877,11 @@ def cmd_sync_health(args: argparse.Namespace) -> None:
             "database_size_bytes": info["database_size_bytes"],
             "last_sync_duration_seconds": duration,
         }
+        database = Database(_db_path_from_args(args))
+        try:
+            result["factual_freshness"] = database.factual_freshness()
+        finally:
+            database.close()
         if info["integrity_check"] != "ok" or info["foreign_key_check"]:
             exit_code = 2
         elif not successful:

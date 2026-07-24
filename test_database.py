@@ -4,6 +4,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 import configparser
@@ -67,6 +68,66 @@ def fixture_responses():
 
 
 class DatabaseTests(unittest.TestCase):
+    def _freshness_db(self, directory, day=None, domains=()):
+        db = Database(Path(directory) / "freshness.db")
+        if day and "hrv" in domains:
+            db.store_domain_rows("hrv", [{"date": day, "start_time": 1, "s": 0, "hrv": 42}])
+        if day and "wake_energy" in domains:
+            db.store_domain_rows("wake_energy", [{"date": day, "start_time": 1, "s": 0, "bioChargeWake": 70}])
+        if day and "readiness" in domains:
+            db.store_domain_rows("readiness", [{"date": day, "timestamp": 1, "timestampUpdate": 2, "status": 200}])
+        if day and "exertion" in domains:
+            db.store_domain_rows("exertion", [{"date": day, "timestamp": 1, "totalScore": 10}])
+        return db
+
+    def test_factual_freshness_complete_partial_pending_and_unavailable(self):
+        now = datetime(2026, 7, 24, 7, 0, tzinfo=timezone.utc)  # 09:00 Ljubljana
+        with tempfile.TemporaryDirectory() as directory:
+            db = self._freshness_db(
+                directory,
+                "2026-07-24",
+                ("hrv", "wake_energy", "readiness", "exertion"),
+            )
+            complete = db.factual_freshness(now)
+            self.assertEqual(complete["morning_data_status"], "complete")
+            self.assertEqual(complete["domain_data_freshness"]["sleep"]["coverage"], "unavailable")
+            self.assertEqual(complete["domain_data_freshness"]["exertion"]["latest_date"], "2026-07-24")
+            db.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            db = self._freshness_db(directory, "2026-07-24", ("hrv",))
+            self.assertEqual(db.factual_freshness(now)["morning_data_status"], "partial")
+            db.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            db = self._freshness_db(
+                directory,
+                "2026-07-23",
+                ("hrv", "wake_energy", "readiness"),
+            )
+            run_id = db.start_sync(7, 1, 2)
+            db.finish_sync(run_id, "ok", {})
+            pending = db.factual_freshness(now)
+            self.assertEqual(pending["morning_data_status"], "pending")
+            self.assertEqual(pending["domain_data_freshness"]["hrv"]["coverage"], "yesterday")
+            db.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            db = self._freshness_db(directory)
+            self.assertEqual(db.factual_freshness(now)["morning_data_status"], "unavailable")
+            db.close()
+
+    def test_factual_freshness_uses_ljubljana_dates_across_dst(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = self._freshness_db(directory, "2026-03-29", ("hrv",))
+            before_morning = db.factual_freshness(
+                datetime(2026, 3, 28, 23, 30, tzinfo=timezone.utc)
+            )
+            self.assertEqual(before_morning["today"], "2026-03-29")
+            self.assertEqual(before_morning["morning_expectation"], "before_first_morning_sync")
+            self.assertEqual(before_morning["domain_data_freshness"]["hrv"]["coverage"], "today")
+            db.close()
+
     def test_backfill_is_chunked_resumable_and_idempotent(self):
         with tempfile.TemporaryDirectory() as directory:
             db = Database(Path(directory) / "zepp.db")
@@ -92,6 +153,15 @@ class DatabaseTests(unittest.TestCase):
                 "SELECT status, cursor_to_date FROM historical_sync_progress WHERE domain='hrv'"
             ).fetchone()
             self.assertEqual(tuple(progress), ("complete", hrv["target_from_date"]))
+            db.close()
+
+    def test_all_domain_sync_failure_is_not_a_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Database(Path(directory) / "zepp.db")
+            responses = fixture_responses()
+            result = sync_native_metrics(FakeClient(responses, set(responses)), db, 7)
+            self.assertEqual(result["status"], "error")
+            self.assertTrue(all(row["status"] == "error" for row in result["domains"]))
             db.close()
 
     def test_initialization_schema_and_path_precedence(self):
@@ -245,7 +315,10 @@ class DatabaseTests(unittest.TestCase):
             db.close()
             healthy = subprocess.run(command, capture_output=True, text=True)
             self.assertEqual(healthy.returncode, 0)
-            self.assertEqual(json.loads(healthy.stdout)["status"], "healthy")
+            healthy_json = json.loads(healthy.stdout)
+            self.assertEqual(healthy_json["status"], "healthy")
+            self.assertIn("sync_freshness", healthy_json["factual_freshness"])
+            self.assertIn("domain_data_freshness", healthy_json["factual_freshness"])
 
         for filename, expected in (
             ("deploy/systemd/zepp-health-sync.service", {"Type": "oneshot", "Persistent": None}),
@@ -259,6 +332,29 @@ class DatabaseTests(unittest.TestCase):
                 self.assertIn("__ZEPP_RUNTIME_USER__", parser["Service"]["User"])
             else:
                 self.assertEqual(parser["Timer"]["Persistent"], expected["Persistent"])
+
+        timer_text = Path("deploy/systemd/zepp-health-sync.timer").read_text()
+        schedules = [
+            line.split("=", 1)[1]
+            for line in timer_text.splitlines()
+            if line.startswith("OnCalendar=")
+        ]
+        self.assertEqual(schedules, [
+            "*-*-* 02:00:00 Europe/Ljubljana",
+            "*-*-* 06:30:00 Europe/Ljubljana",
+            "*-*-* 08:30:00 Europe/Ljubljana",
+            "*-*-* 12:00:00 Europe/Ljubljana",
+            "*-*-* 18:00:00 Europe/Ljubljana",
+            "*-*-* 22:00:00 Europe/Ljubljana",
+        ])
+        success_dropin = Path(
+            "deploy/systemd/zepp-health-sync.service.d/10-context-on-success.conf"
+        ).read_text()
+        self.assertIn("OnSuccess=coach-context-generate.service", success_dropin)
+        self.assertNotIn("OnFailure=", success_dropin)
+        wrapper_text = Path("scripts/zepp-health-sync").read_text()
+        self.assertIn("zepp-health-sync skipped: lock held", wrapper_text)
+        self.assertIn("exit 75", wrapper_text)
 
 
 if __name__ == "__main__":

@@ -63,7 +63,7 @@ sidecar files.
 
 ## Migrations and deployment
 
-The database initializes with schema version 2. Future compatible schema
+The database initializes with schema version 3. Future compatible schema
 changes must increment the migration version and apply transactional migrations
 before normal reads/writes. The database is runtime state, not source code:
 
@@ -81,6 +81,13 @@ The `sync-health` command reports database integrity, synchronization age,
 latest run state, lock state, and duration. It returns 0 for healthy, 1 for a
 warning, 2 for a failed synchronization/database state, and 3 for a
 configuration or database access error.
+
+Its JSON also includes `factual_freshness`, computed without a schema change.
+Sync freshness is the latest successful `sync_runs` timestamp. Domain
+freshness is `MAX(event_date)` for each actual table, compared with the
+`Europe/Ljubljana` calendar date. The schema has no confirmed native
+sleep-summary table, so `sleep` is unsupported/unavailable while
+`sleep_related_readiness` retains its precise existing meaning.
 
 ## Integrity, backup, and restore
 

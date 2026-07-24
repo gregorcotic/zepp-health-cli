@@ -1,8 +1,13 @@
 [Unit]
-Description=Run native Zepp synchronization every six hours
+Description=Run native Zepp synchronization at fixed local freshness times
 
 [Timer]
-OnCalendar=*-*-* 00/6:00:00
+OnCalendar=*-*-* 02:00:00 Europe/Ljubljana
+OnCalendar=*-*-* 06:30:00 Europe/Ljubljana
+OnCalendar=*-*-* 08:30:00 Europe/Ljubljana
+OnCalendar=*-*-* 12:00:00 Europe/Ljubljana
+OnCalendar=*-*-* 18:00:00 Europe/Ljubljana
+OnCalendar=*-*-* 22:00:00 Europe/Ljubljana
 Persistent=true
 Unit=zepp-health-sync.service
 

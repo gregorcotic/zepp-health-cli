@@ -153,6 +153,26 @@ python3 zepp_health.py --config /tmp/other.json temperature
 For Ubuntu systemd installation, locking, monitoring, journal logs, and
 backup operations, see [docs/operations.md](docs/operations.md).
 
+`sync-health --json` separates synchronization freshness from factual domain
+freshness. `factual_freshness.sync_freshness` says when the last successful
+Zepp synchronization completed; `domain_data_freshness` reports the latest
+stored date for `hrv`, `readiness`, `sleep_related_readiness`, `wake_energy`,
+and `exertion`, using `Europe/Ljubljana` for `today`. The standalone database
+does not currently contain a confirmed native sleep-summary table, so `sleep`
+is explicitly reported as unsupported/unavailable rather than inferred.
+
+`morning_data_status` is mechanical, not a readiness calculation:
+
+- `complete`: all supported morning recovery domains (HRV, readiness,
+  sleep-related readiness, and wake energy) contain today.
+- `partial`: at least one, but not all, of those domains contains today.
+- `pending`: recovery data exists, but none of those domains contains today.
+- `unavailable`: none of those recovery domains contains any stored data.
+
+Before 06:30 local time, `morning_expectation=before_first_morning_sync` avoids
+turning missing same-day data into a stale/error assertion. A successful sync
+never changes `morning_data_status` by itself; stored domain dates do.
+
 `--days N` works either before or after the subcommand (e.g. both `--days 7 heart-rate` and `heart-rate --days 7` are accepted).
 
 Examples:
