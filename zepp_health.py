@@ -685,6 +685,28 @@ ACTIVITY_SPORT_CATALOG = {
     (9, 0): ("Outdoor Cycling", "Cycling", False),
     (9, 5): ("Outdoor Cycling - Zepp Coach", "Cycling", True),
 }
+ACTIVITY_CAPABILITY_FIXTURES = (
+    ("Ski", 105, 0, "1767339463", "2026-01-02"),
+    ("Cross-training", 130, 0, "1784739852", "2026-07-22"),
+    ("Pool Swim", 14, 0, "1780212041", "2026-05-31"),
+    ("Open Water Swim", 15, 0, "1783403679", "2026-07-07"),
+    (
+        "Open Water Swim - Zepp Coach", 15, 5, "1780763442",
+        "2026-06-06",
+    ),
+    ("E-MTB", 207, 0, "1781713274", "2026-06-17"),
+    ("Gravel Cycling", 208, 0, "1783747838", "2026-07-11"),
+    ("Hiking", 22, 0, "1784948221", "2026-07-25"),
+    ("Hiking - Zepp Coach", 22, 5, "1781345402", "2026-06-13"),
+    ("Mountain Hiking", 224, 0, "1779616645", "2026-05-24"),
+    ("Walking", 6, 0, "1784053037", "2026-07-14"),
+    ("Walking - Zepp Coach", 6, 5, "1770024247", "2026-02-02"),
+    ("Outdoor Cycling", 9, 0, "1784448489", "2026-07-19"),
+    (
+        "Outdoor Cycling - Zepp Coach", 9, 5, "1772025510",
+        "2026-02-25",
+    ),
+)
 ACTIVITY_SPORT_MAPPINGS = {
     key: {
         "type": key[0],
@@ -999,6 +1021,15 @@ def _activity_distance_metres(
     record: dict[str, Any],
 ) -> tuple[int | float | None, str | None]:
     """Resolve distance using the established high-precision/dis precedence."""
+    if (
+        _activity_number(record.get("type")) == 105
+        and _activity_number(record.get("sport_mode")) == 0
+    ):
+        ski_distance = _activity_usable_metric_number(
+            record.get("climb_dis_descend")
+        )
+        if ski_distance is not None:
+            return ski_distance, "climb_dis_descend"
     for field in ("highPrecisionDistance", "dis"):
         value = _activity_usable_metric_number(record.get(field))
         if value is not None:
@@ -1023,8 +1054,8 @@ def interpret_activity_metrics(record: dict[str, Any]) -> dict[str, Any]:
         "altitude_ascend", "altitude_descend", "elevationGain",
         "elevationLoss", "cumulativeClimbingAscent",
         "maximumClimbingAscent", "downhill_num",
-        "downhill_max_altitude_desend", "max_altitude", "min_altitude",
-        "avg_altitude",
+        "downhill_max_altitude_desend", "climb_dis_descend",
+        "max_altitude", "min_altitude", "avg_altitude",
     )
     raw_metrics = {
         field: record[field] for field in raw_fields if field in record
@@ -1053,7 +1084,7 @@ def interpret_activity_metrics(record: dict[str, Any]) -> dict[str, Any]:
     normalized: dict[str, Any] = {}
     duration, duration_field = _activity_duration_seconds(record)
     distance, distance_field = _activity_distance_metres(record)
-    calories = _activity_number(record.get("calorie"))
+    calories = _activity_usable_metric_number(record.get("calorie"))
     normalized.update({
         "duration_s": {
             "value": duration,
@@ -1340,11 +1371,7 @@ def _activity_representative_metrics(
 
     distance, distance_field = _activity_distance_metres(record)
 
-    calories = (
-        record.get("calorie")
-        if isinstance(record.get("calorie"), (int, float))
-        else None
-    )
+    calories = _activity_usable_metric_number(record.get("calorie"))
     return {
         "representative_end_time": end_time,
         "representative_local_date": local_date,
@@ -1457,6 +1484,219 @@ def inventory_activity_payload(
             ),
         },
         "type_groups": type_groups,
+    }
+
+
+def _activity_audit_field(record: dict[str, Any], field: str) -> dict[str, Any]:
+    status = _activity_field_status(record, field)
+    detail: dict[str, Any] = {"status": status}
+    if field not in record:
+        return detail
+    value = record[field]
+    if isinstance(value, (dict, list)):
+        detail["structure"] = _activity_safe_nested(value, include_text=False)
+    elif isinstance(value, str):
+        number = _activity_number(value)
+        if number is not None:
+            detail["raw_value"] = number
+            detail["raw_type"] = "str"
+        elif field == "syncedTimezone":
+            detail["raw_value"] = value
+            detail["raw_type"] = "str"
+        else:
+            detail["text"] = _activity_text_value(value, include_text=False)
+    elif isinstance(value, (int, float, bool)) or value is None:
+        detail["raw_value"] = value
+        detail["raw_type"] = type(value).__name__
+    return detail
+
+
+def _activity_gps_capability(
+    record: dict[str, Any], mapping: dict[str, Any]
+) -> dict[str, Any]:
+    evidence = _activity_gps_track_evidence(record)
+    location_present = record.get("location") not in (None, "", [], {})
+    if mapping["sport_name"] in {"Pool Swim", "Cross-training"}:
+        expectation = "GPS_NOT_APPLICABLE"
+    elif mapping["sport_name"].startswith("Open Water Swim"):
+        expectation = "GPS_EXPECTED"
+    else:
+        expectation = "GPS_USEFUL"
+    if evidence["gps_track_present"]:
+        indication = "GPS_INDICATED"
+        track_status = "RAW_TRACK_AVAILABLE"
+    elif expectation == "GPS_NOT_APPLICABLE":
+        indication = "GPS_NOT_APPLICABLE"
+        track_status = "GPS_NOT_APPLICABLE"
+    else:
+        indication = "GPS_INDICATED" if location_present else "GPS_NOT_INDICATED"
+        track_status = "RAW_TRACK_NOT_FOUND"
+    return {
+        "expectation": expectation,
+        "summary_location_metadata_present": location_present,
+        "gps_indication": indication,
+        "raw_track_status": track_status,
+        **evidence,
+    }
+
+
+def _activity_sensor_evidence(
+    field_details: dict[str, dict[str, Any]], fields: tuple[str, ...]
+) -> str:
+    populated = [
+        field_details[field]
+        for field in fields
+        if field in field_details
+        and field_details[field]["status"] == "PRESENT_WITH_VALUE"
+    ]
+    if any(
+        isinstance(detail.get("raw_value"), (int, float))
+        and not isinstance(detail.get("raw_value"), bool)
+        and detail["raw_value"] > 0
+        for detail in populated
+    ):
+        return "ACTIVITY_SENSOR_DATA_PRESENT"
+    numeric_values = [
+        detail["raw_value"]
+        for detail in populated
+        if isinstance(detail.get("raw_value"), (int, float))
+        and not isinstance(detail.get("raw_value"), bool)
+    ]
+    if (
+        populated
+        and len(numeric_values) == len(populated)
+        and all(value == 0 for value in numeric_values)
+    ):
+        return "ACTIVITY_ZERO_VALUE_SEMANTICS_UNKNOWN"
+    if populated:
+        return "ACTIVITY_SENSOR_VALUE_SEMANTICS_UNKNOWN"
+    return "SPORT_CAPABILITY_UNKNOWN_ACTIVITY_HAS_NO_SENSOR_DATA"
+
+
+def audit_activity_capabilities(
+    data: Any, *, timezone_name: str = FRESHNESS_TIMEZONE
+) -> dict[str, Any]:
+    """Audit only the 14 approved representative activities."""
+    records = _activity_records(data)
+    by_track_id = {
+        str(record.get("trackid", record.get("trackId", ""))): record
+        for record in records
+    }
+    activities: list[dict[str, Any]] = []
+    by_pair: dict[tuple[int, int], dict[str, Any]] = {}
+    text_fields = (
+        "sport_title", "crossfitContent", "coachInsight",
+        "description", "notes", "remark", "memo",
+    )
+    for sport_name, type_id, sport_mode, track_id, fixture_date in (
+        ACTIVITY_CAPABILITY_FIXTURES
+    ):
+        record = by_track_id.get(track_id)
+        mapping = ACTIVITY_SPORT_MAPPINGS[(type_id, sport_mode)]
+        if record is None:
+            activities.append({
+                "sport_name": sport_name,
+                "type": type_id,
+                "sport_mode": sport_mode,
+                "fixture_date": fixture_date,
+                "representative_trackid": track_id,
+                "matched": False,
+            })
+            continue
+        actual_pair = (
+            _activity_number(record.get("type")),
+            _activity_number(record.get("sport_mode")),
+        )
+        field_details = {
+            field: _activity_audit_field(record, field)
+            for field in ACTIVITY_COVERAGE_FIELDS
+        }
+        field_statuses = {
+            field: detail["status"] for field, detail in field_details.items()
+        }
+        text_metadata = {
+            field: _activity_audit_field(record, field)
+            for field in text_fields
+        }
+        metric_status_counts = dict(Counter(field_statuses.values()))
+        activity = {
+            "sport_name": sport_name,
+            "sport_family": mapping["sport_family"],
+            "type": type_id,
+            "sport_mode": sport_mode,
+            "zepp_coach_mode": mapping["zepp_coach_mode"],
+            "fixture_date": fixture_date,
+            "representative_trackid": track_id,
+            "matched": True,
+            "identity_matches_expected_pair": actual_pair == (type_id, sport_mode),
+            **_activity_representative_metrics(record, timezone_name),
+            "metric_status_counts": metric_status_counts,
+            "fields": field_details,
+            "semantic_interpretation": interpret_activity_metrics(record),
+            "gps": _activity_gps_capability(record, mapping),
+            "cycling_sensor_evidence": {
+                "cadence": _activity_sensor_evidence(
+                    field_details, ("avg_cadence", "max_cadence")
+                ),
+                "power": _activity_sensor_evidence(
+                    field_details, ("average_power", "max_power")
+                ),
+            } if mapping["sport_family"] == "Cycling" else None,
+            "text_metadata": text_metadata,
+            "workout_notes_status": (
+                "APP_DATA_KNOWN_TO_EXIST_API_LOCATION_NOT_YET_DISCOVERED"
+                if sport_name == "Cross-training"
+                else "API_LOCATION_NOT_YET_DISCOVERED"
+            ),
+        }
+        activities.append(activity)
+        by_pair[(type_id, sport_mode)] = activity
+
+    comparisons: list[dict[str, Any]] = []
+    for type_id, normal_mode, coach_mode in (
+        (6, 0, 5), (9, 0, 5), (15, 0, 5), (22, 0, 5)
+    ):
+        normal = by_pair.get((type_id, normal_mode))
+        coach = by_pair.get((type_id, coach_mode))
+        if not normal or not coach:
+            continue
+        different = [
+            field
+            for field in ACTIVITY_COVERAGE_FIELDS
+            if normal["fields"][field]["status"] != coach["fields"][field]["status"]
+        ]
+        comparisons.append({
+            "type": type_id,
+            "normal_sport": normal["sport_name"],
+            "coach_sport": coach["sport_name"],
+            "fields_with_different_population_status": different,
+        })
+
+    next_cursor = _activity_response_next(data)
+    return {
+        "raw_record_count": len(records),
+        "requested_fixture_count": len(ACTIVITY_CAPABILITY_FIXTURES),
+        "matched_fixture_count": sum(item["matched"] for item in activities),
+        "all_fixture_identities_match": all(
+            not item["matched"] or item["identity_matches_expected_pair"]
+            for item in activities
+        ),
+        "pagination": {
+            "next": next_cursor,
+            "terminal_single_page_observed": next_cursor == -1,
+            "followed": False,
+        },
+        "status_legend": {
+            "PRESENT_WITH_VALUE": "nonempty value present",
+            "PRESENT_SENTINEL": "reserved for field-specific proven sentinels",
+            "PRESENT_EMPTY": "key present without a value",
+            "ABSENT": "key absent",
+            "UNKNOWN_SEMANTICS": (
+                "known candidate sentinel present; raw value retained"
+            ),
+        },
+        "activities": activities,
+        "coach_mode_comparisons": comparisons,
     }
 
 
@@ -1796,6 +2036,58 @@ def cmd_diagnose_sport_coverage(args: argparse.Namespace) -> None:
             print(format_sport_coverage_mapping_list(inventory))
     else:
         _emit_json(report, args)
+
+
+def cmd_diagnose_sport_capabilities(args: argparse.Namespace) -> None:
+    timezone_name = args.timezone or load_config().get("timezone") or FRESHNESS_TIMEZONE
+    try:
+        start_track_id, stop_track_id = _activity_diagnostic_window(
+            args.from_date, args.to_date, timezone_name
+        )
+    except (ValueError, KeyError) as exc:
+        sys.exit(f"Invalid sport capability date range/timezone: {exc}")
+    client = _load_client()
+    try:
+        payload = client.sport_history(
+            "run", start_track_id, stop_track_id, need_sub_data=args.need_sub_data
+        )
+        audit = audit_activity_capabilities(
+            payload, timezone_name=timezone_name
+        )
+        request_status = "ok"
+    except requests.RequestException as exc:
+        audit = {
+            "requested_fixture_count": len(ACTIVITY_CAPABILITY_FIXTURES),
+            "matched_fixture_count": 0,
+            "activities": [],
+            "error": type(exc).__name__,
+        }
+        if exc.response is not None:
+            audit["http_status"] = exc.response.status_code
+        request_status = "error"
+    report = {
+        "endpoint_contract": {
+            "method": "GET",
+            "path": "/v1/sport/run/history.json",
+            "pagination": "not_followed_unproven",
+        },
+        "request": {
+            "from_date": args.from_date,
+            "to_date": args.to_date,
+            "timezone": timezone_name,
+            "startTrackId": start_track_id,
+            "stopTrackId": stop_track_id,
+            "need_sub_data": args.need_sub_data,
+        },
+        "privacy": (
+            "Only the 14 approved representative activity IDs are audited. "
+            "Credentials, user/device identifiers, URLs, coordinates, and "
+            "activity text values are omitted."
+        ),
+        "request_status": request_status,
+        "audit": audit,
+    }
+    _emit_json(report, args)
 
 
 def cmd_band_data(args: argparse.Namespace) -> None:
@@ -3727,6 +4019,26 @@ def main() -> None:
         ),
     )
     sp.set_defaults(func=cmd_diagnose_sport_coverage)
+
+    sp = sub.add_parser(
+        "diagnose-sport-capabilities",
+        help="Sanitized capability audit of 14 approved production fixtures",
+    )
+    _add_json(sp)
+    sp.add_argument("--from-date", default="2026-01-01")
+    sp.add_argument("--to-date", default="2026-07-26")
+    sp.add_argument(
+        "--timezone",
+        help="IANA timezone for local bounds (default config or Europe/Ljubljana)",
+    )
+    sp.add_argument(
+        "--need-sub-data",
+        type=int,
+        choices=(0, 1),
+        default=1,
+        help="Request Zepp sub-data (default 1)",
+    )
+    sp.set_defaults(func=cmd_diagnose_sport_capabilities)
 
     sp = sub.add_parser("summary", help="Brief text summary")
     _add_days(sp)

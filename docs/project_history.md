@@ -320,3 +320,22 @@ athlete-powered ascent. Ski exposes `vertical_descent_m` and
 `elevation_loss_m`; normalized elevation gain and climbing-load ascent remain
 null. This complements, rather than replaces, the Ojstrica numerical-quality
 model: numerical trust and sport meaning are separate validation layers.
+
+## Z001.8 — production multi-sport capability deep audit
+
+Added `diagnose-sport-capabilities`, a consolidated read-only audit restricted
+to the 14 approved representative IDs. One bounded production request matched
+all 14 among 135 summaries and returned terminal `data.next=-1`. Output
+classifies allow-listed fields by actual population, retains sanitized raw
+provenance and normalized semantics, distinguishes location metadata from
+sample-level tracks, and reports sensor absence per activity.
+
+Production evidence supports basic coach ingestion for every observed sport,
+with limitations for Cross-training strength detail and one Outdoor Cycling
+fixture whose Training Load was unavailable. No raw GPS, altitude, or
+workout-HR sample stream was found in the history summaries. Workout Notes
+remain known app data whose API location is undiscovered.
+
+No mapping or downstream system changed. C017 remains paused; the recommended
+next investigation is the shared activity detail/track contract because it
+gates advanced capabilities across multiple otherwise usable sports.

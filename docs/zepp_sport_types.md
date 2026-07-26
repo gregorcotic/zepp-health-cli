@@ -47,3 +47,10 @@ corrected.
 
 Never commit personal payloads, coordinates, device/user identifiers, tokens,
 URLs, or workout notes.
+
+## Z001.8 coverage confirmation
+
+The bounded 2026 capability audit matched one approved representative for
+every catalog pair, and every record retained its expected exact
+`(type, sport_mode)` identity. No mapping was added or changed. Run and Trail
+Run remain `NOT_FOUND_IN_CURRENT_PRODUCTION_SAMPLE`.

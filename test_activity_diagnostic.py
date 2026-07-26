@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 from zepp_health import (
     ZeppClient,
     _activity_diagnostic_window,
+    audit_activity_capabilities,
     compare_activity_sub_data_payloads,
     diagnose_activity_payload,
     format_sport_coverage_mapping_list,
@@ -555,7 +556,8 @@ class ActivityDiagnosticTests(unittest.TestCase):
             "sport_mode": 0,
             "end_time": "1767354287",
             "run_time": "14824",
-            "dis": "28130",
+            "dis": "0",
+            "climb_dis_descend": 28130,
             "altitude_ascend": 0,
             "altitude_descend": 5913,
             "max_altitude": 1913,
@@ -580,7 +582,12 @@ class ActivityDiagnosticTests(unittest.TestCase):
         self.assertIsNone(result["climbing_load"]["athlete_powered_ascent_m"])
         self.assertEqual(result["raw_metrics"]["altitude_descend"], 5913)
         self.assertEqual(result["raw_metrics"]["altitude_ascend"], 0)
-        self.assertEqual(result["raw_metrics"]["dis"], "28130")
+        self.assertEqual(
+            result["normalized_metrics"]["distance_m"]["source_field"],
+            "climb_dis_descend",
+        )
+        self.assertEqual(result["raw_metrics"]["dis"], "0")
+        self.assertEqual(result["raw_metrics"]["climb_dis_descend"], 28130)
         self.assertEqual(result["metric_semantics"], "PROVEN")
 
     def test_semantic_duration_uses_supported_fallback_precedence(self) -> None:
@@ -726,6 +733,220 @@ class ActivityDiagnosticTests(unittest.TestCase):
         self.assertEqual(
             result["climbing_load"]["reason"],
             "sport_metric_semantics_not_proven",
+        )
+
+    def test_capability_audit_distinguishes_pool_and_open_water_gps(self) -> None:
+        payload = {
+            "data": {
+                "next": -1,
+                "summary": [
+                    {
+                        "trackid": "1780212041",
+                        "type": 14,
+                        "sport_mode": 0,
+                        "swim_pool_length": 25,
+                        "swolf": 42,
+                        "location": {"latitude": 46.1, "longitude": 14.2},
+                        "sport_title": "Private pool title",
+                    },
+                    {
+                        "trackid": "1783403679",
+                        "type": 15,
+                        "sport_mode": 0,
+                        "route": [{
+                            "timestamp": 1,
+                            "latitude": 46.2,
+                            "longitude": 14.3,
+                        }],
+                    },
+                ],
+            }
+        }
+        audit = audit_activity_capabilities(payload)
+        activities = {
+            item["sport_name"]: item
+            for item in audit["activities"]
+            if item["matched"]
+        }
+        pool = activities["Pool Swim"]
+        open_water = activities["Open Water Swim"]
+        self.assertEqual(pool["gps"]["expectation"], "GPS_NOT_APPLICABLE")
+        self.assertEqual(pool["gps"]["raw_track_status"], "GPS_NOT_APPLICABLE")
+        self.assertEqual(open_water["gps"]["expectation"], "GPS_EXPECTED")
+        self.assertEqual(
+            open_water["gps"]["raw_track_status"], "RAW_TRACK_AVAILABLE"
+        )
+        rendered = json.dumps(audit)
+        self.assertNotIn("Private pool title", rendered)
+        self.assertNotIn("46.1", rendered)
+        self.assertNotIn("14.3", rendered)
+
+        payload["data"]["summary"][0]["route"] = [{
+            "timestamp": 2,
+            "latitude": 46.4,
+            "longitude": 14.5,
+        }]
+        audit = audit_activity_capabilities(payload)
+        pool = next(
+            item for item in audit["activities"]
+            if item["sport_name"] == "Pool Swim"
+        )
+        self.assertEqual(pool["gps"]["expectation"], "GPS_NOT_APPLICABLE")
+        self.assertTrue(pool["gps"]["gps_track_present"])
+        self.assertEqual(pool["gps"]["raw_track_status"], "RAW_TRACK_AVAILABLE")
+        self.assertNotIn("46.4", json.dumps(audit))
+
+    def test_capability_audit_preserves_unexpected_cross_training_track(self) -> None:
+        fixture = {
+            "trackid": "1784739852",
+            "type": 130,
+            "sport_mode": 0,
+        }
+        payload = {"data": {"next": -1, "summary": [fixture]}}
+        audit = audit_activity_capabilities(payload)
+        cross_training = next(
+            item for item in audit["activities"]
+            if item["sport_name"] == "Cross-training"
+        )
+        self.assertEqual(
+            cross_training["gps"]["expectation"], "GPS_NOT_APPLICABLE"
+        )
+        self.assertEqual(
+            cross_training["gps"]["raw_track_status"], "GPS_NOT_APPLICABLE"
+        )
+
+        fixture["route"] = [{
+            "timestamp": 3,
+            "latitude": 46.6,
+            "longitude": 14.7,
+        }]
+        audit = audit_activity_capabilities(payload)
+        cross_training = next(
+            item for item in audit["activities"]
+            if item["sport_name"] == "Cross-training"
+        )
+        self.assertTrue(cross_training["gps"]["gps_track_present"])
+        self.assertEqual(
+            cross_training["gps"]["raw_track_status"], "RAW_TRACK_AVAILABLE"
+        )
+        self.assertNotIn("46.6", json.dumps(audit))
+
+    def test_capability_audit_classifies_sensor_evidence_factually(self) -> None:
+        payload = {
+            "data": {
+                "next": -1,
+                "summary": [{
+                    "trackid": "1783747838",
+                    "type": 208,
+                    "sport_mode": 0,
+                    "avg_cadence": -1,
+                    "max_cadence": -1,
+                    "average_power": -1,
+                    "max_power": -1,
+                }],
+            }
+        }
+        audit = audit_activity_capabilities(payload)
+        gravel = next(
+            item for item in audit["activities"]
+            if item["sport_name"] == "Gravel Cycling"
+        )
+        self.assertEqual(
+            gravel["cycling_sensor_evidence"]["power"],
+            "SPORT_CAPABILITY_UNKNOWN_ACTIVITY_HAS_NO_SENSOR_DATA",
+        )
+        self.assertEqual(
+            gravel["fields"]["average_power"]["status"], "UNKNOWN_SEMANTICS"
+        )
+
+        payload["data"]["summary"][0]["avg_cadence"] = 72
+        payload["data"]["summary"][0]["max_cadence"] = 91
+        audit = audit_activity_capabilities(payload)
+        gravel = next(
+            item for item in audit["activities"]
+            if item["sport_name"] == "Gravel Cycling"
+        )
+        self.assertEqual(
+            gravel["cycling_sensor_evidence"]["cadence"],
+            "ACTIVITY_SENSOR_DATA_PRESENT",
+        )
+
+        payload["data"]["summary"][0]["average_power"] = 210
+        payload["data"]["summary"][0]["max_power"] = 430
+        audit = audit_activity_capabilities(payload)
+        gravel = next(
+            item for item in audit["activities"]
+            if item["sport_name"] == "Gravel Cycling"
+        )
+        self.assertEqual(
+            gravel["cycling_sensor_evidence"]["power"],
+            "ACTIVITY_SENSOR_DATA_PRESENT",
+        )
+
+        payload["data"]["summary"][0]["avg_cadence"] = 0
+        payload["data"]["summary"][0]["max_cadence"] = 0
+        audit = audit_activity_capabilities(payload)
+        gravel = next(
+            item for item in audit["activities"]
+            if item["sport_name"] == "Gravel Cycling"
+        )
+        self.assertEqual(
+            gravel["cycling_sensor_evidence"]["cadence"],
+            "ACTIVITY_ZERO_VALUE_SEMANTICS_UNKNOWN",
+        )
+
+        payload["data"]["summary"][0]["avg_cadence"] = -2
+        payload["data"]["summary"][0]["max_cadence"] = -3
+        audit = audit_activity_capabilities(payload)
+        gravel = next(
+            item for item in audit["activities"]
+            if item["sport_name"] == "Gravel Cycling"
+        )
+        self.assertEqual(
+            gravel["cycling_sensor_evidence"]["cadence"],
+            "ACTIVITY_SENSOR_VALUE_SEMANTICS_UNKNOWN",
+        )
+
+        payload["data"]["summary"][0]["avg_cadence"] = "not-a-number"
+        payload["data"]["summary"][0]["max_cadence"] = "unknown"
+        audit = audit_activity_capabilities(payload)
+        gravel = next(
+            item for item in audit["activities"]
+            if item["sport_name"] == "Gravel Cycling"
+        )
+        self.assertEqual(
+            gravel["cycling_sensor_evidence"]["cadence"],
+            "ACTIVITY_SENSOR_VALUE_SEMANTICS_UNKNOWN",
+        )
+
+    def test_capability_audit_retains_coach_mode_comparison(self) -> None:
+        payload = {
+            "data": {
+                "next": -1,
+                "summary": [
+                    {
+                        "trackid": "1784053037",
+                        "type": 6,
+                        "sport_mode": 0,
+                        "runningProgram": "",
+                    },
+                    {
+                        "trackid": "1770024247",
+                        "type": 6,
+                        "sport_mode": 5,
+                        "runningProgram": {"target": 30},
+                    },
+                ],
+            }
+        }
+        audit = audit_activity_capabilities(payload)
+        comparison = next(
+            item for item in audit["coach_mode_comparisons"]
+            if item["type"] == 6
+        )
+        self.assertIn(
+            "runningProgram",
+            comparison["fields_with_different_population_status"],
         )
 
 

@@ -71,3 +71,54 @@ production-proven as sport identities, but their metric profiles remain
 
 Strava remains optional validation/enrichment for titles, notes, exported
 routes, and cross-source comparison; it is not automatic ground truth.
+
+## Z001.8 representative production audit
+
+A bounded `GET /v1/sport/run/history.json` request for 2026-01-01 through
+2026-07-26 matched all 14 approved representatives among 135 summaries and
+ended with `data.next=-1`. This proves population for these activities, not an
+account-wide contract.
+
+| Sport | Basic facts populated | Sport-specific facts populated | Basic coach coverage | Advanced coverage |
+|---|---|---|---|---|
+| Ski | duration, HR, calories, load, TE | 28.13 km downhill distance, 5921 m vertical descent, 14 runs, altitude | READY | raw route/downhill timing missing |
+| Cross-training | duration, HR, calories, load, TE, RPE | balance payload present | READY WITH LIMITATIONS | notes, exercises, muscle/body-region load missing |
+| Pool Swim | distance, duration, HR, calories, load, TE, RPE | 25 m pool, SWOLF, strokes, style | READY | interval/lap detail missing |
+| Open Water Swim | distance, duration, HR, load, TE, RPE | SWOLF, strokes, style; location metadata | READY | raw route missing |
+| Open Water Swim - Coach | distance, duration, HR, load, TE | SWOLF, strokes, style; location metadata | READY | raw route and proven coach-plan detail missing |
+| E-MTB | distance, duration, HR, load, TE, ascent/descent | location metadata; cadence zero, power unavailable | READY | raw route and sensor streams missing |
+| Gravel Cycling | distance, duration, HR, load, TE, RPE, ascent/descent | cadence populated; power unavailable | READY | raw route and power stream missing |
+| Hiking | distance, duration, HR, load, TE, RPE, ascent/descent, steps | altitude range and climb-distance summaries | READY | raw route/altitude/HR streams missing |
+| Hiking - Coach | distance, duration, HR, load, TE, RPE, ascent/descent, steps | altitude and climb-distance summaries | READY | raw streams and proven coach-plan detail missing |
+| Mountain Hiking | distance, duration, HR, load, TE, RPE, ascent/descent, steps | altitude and climb-distance summaries | READY | raw route/altitude/HR streams missing |
+| Walking | distance, duration, HR, load, TE, RPE, ascent/descent, steps | cadence/stride summaries | READY | raw route missing |
+| Walking - Coach | distance, duration, HR, load, TE, ascent/descent, steps | cadence/stride summaries | READY | raw route and proven coach-plan detail missing |
+| Outdoor Cycling | distance, duration/pause, HR, TE, RPE, ascent/descent | cadence populated; load sentinel and power unavailable | READY WITH LIMITATIONS | raw route and sensor streams missing |
+| Outdoor Cycling - Coach | distance, duration, HR, load, TE, ascent/descent | cadence populated; power unavailable | READY | raw route and proven coach-plan detail missing |
+
+Raw `te=3` in the Cross-training fixture matches the app's 0.3. This is
+retained as evidence rather than silently treated as a universal conversion
+for every sport. No representative history summary contained a detected
+sample-level GPS, altitude, or workout-HR track. Location metadata is only a
+GPS indication. Pool Swim and Cross-training correctly classify GPS as not
+applicable.
+
+Cycling sensor absence is activity-specific. Positive cadence occurred for
+Gravel and both Outdoor Cycling fixtures; E-MTB reported zero. Power fields
+contained unavailable candidates. This does not prove that the sport/API can
+never carry power. Known Cross-training Workout Notes remain
+`APP_DATA_KNOWN_TO_EXIST_API_LOCATION_NOT_YET_DISCOVERED`.
+
+### Basic coach coverage versus advanced analysis coverage
+
+The summaries provide useful basic facts across all 14 representatives:
+identity, duration, distance where relevant, HR, calories, usually native
+load/effect metrics, and sport-specific swim, hiking, cycling, or Ski facts.
+This supports Zepp as the primary source for the observed activity mix at
+basic-coaching level.
+
+Advanced analysis remains incomplete. Route reconstruction, native elevation
+validation, workout-HR streams, swim intervals, cycling power streams, and
+structured strength/body-region analysis require a detail/track contract not
+yet discovered. Strava can optionally add titles, notes, routes, GPX access,
+and cross-source validation without becoming a normal-operation dependency.

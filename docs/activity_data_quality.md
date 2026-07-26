@@ -549,6 +549,19 @@ Future experiments must retain results from:
 
 No candidate is selected in Z001.5.
 
+### Basic activity coverage versus advanced validation
+
+Z001.8 confirms that summary sufficiency and forensic depth are separate. A
+sport may be safe for basic coach ingestion when identity, duration, distance
+where relevant, HR, calories, and native training metrics are present, while
+sample-level route, altitude, or HR data remains undiscovered.
+
+Advanced analysis is explicitly missing when it requires route
+reconstruction, track-derived elevation, swim intervals, cycling sensor
+streams, or strength/body-region detail. Sensor status is activity-specific:
+an unavailable power field or zero cadence gives no positive sensor evidence,
+but does not prove the sport/API cannot support that sensor.
+
 ### Safe deterministic sub-data comparison
 
 `diagnose-activities --compare-sub-data --track-id ...` performs exactly two

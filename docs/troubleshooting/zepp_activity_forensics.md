@@ -883,3 +883,26 @@ python3 zepp_health.py diagnose-activities \
 The diagnostic is allow-listed: it excludes credentials, device/user IDs,
 URLs, coordinate values, and activity text. Its `semantic_interpretation`
 section shows raw provenance and the normalized Ski decision.
+
+## Z001.8 consolidated capability audit
+
+```bash
+python3 zepp_health.py diagnose-sport-capabilities \
+  --from-date 2026-01-01 \
+  --to-date 2026-07-26 \
+  --timezone Europe/Ljubljana \
+  --need-sub-data 1 \
+  --json
+```
+
+This performs one bounded, read-only history request and includes only the 14
+allow-listed representative IDs. It omits coordinates, activity text, URLs,
+credentials, and user/device identifiers. Verify
+`matched_fixture_count=14`, `all_fixture_identities_match=true`, and inspect
+the reported cursor without assuming account-wide completeness.
+
+`summary_location_metadata_present=true` is only a GPS indication.
+`RAW_TRACK_NOT_FOUND` means no coordinate collection was detected in this
+history response. `GPS_NOT_APPLICABLE` is expected for Pool Swim and
+Cross-training. Mode-5 population differences are observations from one
+representative per mode, not proof that Coach mode caused them.
