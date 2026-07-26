@@ -124,6 +124,8 @@ python3 zepp_health.py insights --days 30 --csv insights.csv
 # Zepp-native recovery, energy, HRV and exertion metrics
 python3 zepp_health.py hrv --days 14
 python3 zepp_health.py wake-energy --days 14
+python3 zepp_health.py diagnose-wake-energy \
+  --from-date 2026-07-23 --to-date 2026-07-25 --json
 python3 zepp_health.py exertion --days 30
 python3 zepp_health.py lifeload --days 30
 python3 zepp_health.py charge-data --days 7
@@ -205,6 +207,7 @@ All data requests are **GET**s to your regional `host`, with header `apptoken: <
 | `insights` | `GET /v2/users/me/events?eventType=Charge&subType=insight_data` |
 | `hrv` | `GET /v2/users/me/events?eventType=HRVRMSSD&subType=real_data` |
 | `wake-energy` | `GET /v2/users/me/events?eventType=Charge&subType=wake_data` |
+| `diagnose-wake-energy` | Same wake endpoint, with a sanitized narrow-range raw/date/SQLite comparison |
 | `exertion` | `GET /v2/users/me/events?eventType=exertion&subType=algo_result` |
 | `lifeload` | `GET /v2/users/me/events?eventType=LifeLoad&subType=summary` |
 | `charge-data` | `GET /v2/users/me/events?eventType=Charge&subType=real_data` |
@@ -277,6 +280,14 @@ and includes `total`, `physical`, `mental`, `s`, and `u`; the CLI does not
 aggregate it into daily averages or scores. `Charge/summary` returned a
 different battery/charge series (`minCharge`, `maxCharge`, and cumulative
 charging/consumption fields), not a BioCharge daily summary.
+
+`diagnose-wake-energy` is intended for forensic use. It prints only allow-listed
+wake/date values and unknown field names, never request headers, credentials,
+cookies, user IDs, GPS, or unrelated event domains. Its date range is inclusive
+in the configured timezone (or `Europe/Ljubljana` by default), and its SQLite
+read is read-only. The normal synchronization status does not distinguish an
+empty API response from a nonempty raw response that produced zero normalized
+rows; this diagnostic reports both counts separately.
 
 `event-domains` probes known candidates only. The API does not expose a
 server-side exhaustive event-domain listing through the current client method.

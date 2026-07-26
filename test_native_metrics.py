@@ -1,8 +1,12 @@
 import json
 import unittest
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from zepp_health import (
+    _wake_diagnostic_window,
     consolidate_daily_status,
+    diagnose_wake_energy_payload,
     discover_event_domains,
     latest_readiness_per_day,
     normalize_charge_data,
@@ -57,6 +61,109 @@ class NativeMetricsTests(unittest.TestCase):
         self.assertEqual(rows[0]["wakeCharge"], 80)
         self.assertEqual(rows[0]["exertionScore"], 382)
         self.assertEqual(rows[0]["raw_sample"]["snapshot"]["physicalMinutes"], 10)
+
+    def test_wake_data_explicit_today_date_is_preserved(self) -> None:
+        rows = normalize_wake_data({"items": [{
+            "date": "2026-07-24",
+            "value": {"samples": [{"bioChargeWake": 72}]},
+        }]})
+        self.assertEqual(rows[0]["date"], "2026-07-24")
+
+    def test_wake_data_midnight_boundary_characterizes_timezone_behavior(self) -> None:
+        instant = datetime(
+            2026, 7, 24, 0, 30, tzinfo=ZoneInfo("Europe/Ljubljana")
+        )
+        timestamp_ms = int(instant.timestamp() * 1000)
+        without_timezone = normalize_wake_data({"items": [{
+            "timestamp": timestamp_ms,
+            "value": {"samples": [{"bioChargeWake": 70}]},
+        }]})
+        with_timezone = normalize_wake_data({"items": [{
+            "timestamp": timestamp_ms,
+            "timezone": "Europe/Ljubljana",
+            "value": {"samples": [{"bioChargeWake": 70}]},
+        }]})
+        self.assertEqual(without_timezone[0]["date"], "2026-07-23")
+        self.assertEqual(with_timezone[0]["date"], "2026-07-24")
+
+    def test_wake_data_epoch_seconds_are_treated_as_milliseconds(self) -> None:
+        timestamp_seconds = int(datetime(
+            2026, 7, 24, 0, 30, tzinfo=ZoneInfo("Europe/Ljubljana")
+        ).timestamp())
+        rows = normalize_wake_data({"items": [{
+            "timestamp": timestamp_seconds,
+            "timezone": "Europe/Ljubljana",
+            "value": {"samples": [{"bioChargeWake": 70}]},
+        }]})
+        self.assertEqual(rows[0]["date"], "1970-01-21")
+
+    def test_wake_data_sleep_crossing_midnight_inherits_parent_date(self) -> None:
+        wake = datetime(
+            2026, 7, 24, 6, 30, tzinfo=ZoneInfo("Europe/Ljubljana")
+        )
+        rows = normalize_wake_data({"items": [{
+            "date": "2026-07-23",
+            "value": {"samples": [{
+                "timestamp": int(wake.timestamp() * 1000),
+                "bioChargeWake": 70,
+            }]},
+        }]})
+        self.assertEqual(rows[0]["date"], "2026-07-23")
+        self.assertEqual(rows[0]["sample_timestamp"], rows[0]["timestamp"])
+
+    def test_wake_data_parent_fields_without_samples_are_normalized(self) -> None:
+        rows = normalize_wake_data({"items": [{
+            "date": "2026-07-24",
+            "value": {"bioChargeWake": 70},
+        }]})
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["bioChargeWake"], 70)
+
+    def test_wake_data_empty_samples_falls_back_to_parent_fields(self) -> None:
+        rows = normalize_wake_data({"items": [{
+            "date": "2026-07-24",
+            "value": {"samples": [], "bioChargeWake": 70},
+        }]})
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["bioChargeWake"], 70)
+
+    def test_wake_data_multiple_samples_and_unsupported_wrapper(self) -> None:
+        record = {
+            "date": "2026-07-24",
+            "value": {"samples": [
+                {"s": 0, "bioChargeWake": 70},
+                {"s": 1000, "bioChargeWake": 74},
+            ]},
+        }
+        self.assertEqual(len(normalize_wake_data({"items": [record]})), 2)
+        self.assertEqual(normalize_wake_data({"unexpected": {"items": [record]}}), [])
+
+    def test_wake_diagnostic_is_sanitized_and_compares_dates(self) -> None:
+        payload = {"items": [{
+            "userId": "secret-user",
+            "date": "2026-07-23",
+            "authorization": "secret-token",
+            "value": {"samples": [{
+                "timestamp": 1784867400000,
+                "bioChargeWake": 70,
+                "snapshot": {"unrelated": "private"},
+                "newWakeMetric": 12,
+            }]},
+        }]}
+        report = diagnose_wake_energy_payload(payload)
+        rendered = json.dumps(report)
+        self.assertNotIn("secret-user", rendered)
+        self.assertNotIn("secret-token", rendered)
+        self.assertNotIn("private", rendered)
+        self.assertIn("newWakeMetric", rendered)
+        sample = report["records"][0]["samples"][0]
+        self.assertEqual(sample["normalized_wake_energy_event_date"], "2026-07-23")
+
+    def test_wake_diagnostic_window_uses_local_inclusive_dates(self) -> None:
+        start, end = _wake_diagnostic_window(
+            "2026-07-24", "2026-07-24", "Europe/Ljubljana"
+        )
+        self.assertEqual(end - start, 24 * 60 * 60 * 1000)
 
     def test_readiness_watch_score_and_embedded_sleep_fields(self) -> None:
         rows = normalize_readiness_data({"items": [{"date": "2026-07-08", "value": {

@@ -228,6 +228,70 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(db.status()["record_counts"]["readiness_records"], 1)
             db.close()
 
+    def test_revised_same_day_wake_value_updates_existing_logical_row(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Database(Path(directory) / "zepp.db")
+            first = [{
+                "date": "2026-07-24", "start_time": 1000, "s": 0,
+                "sample_timestamp": 1000, "bioChargeWake": 70,
+                "raw_sample": {"s": 0, "bioChargeWake": 70},
+            }]
+            revised = [{
+                "date": "2026-07-24", "start_time": 1000, "s": 0,
+                "sample_timestamp": 1000, "bioChargeWake": 74,
+                "raw_sample": {"s": 0, "bioChargeWake": 74},
+            }]
+            self.assertEqual(
+                db.store_domain_rows("wake_energy", first),
+                {"inserted": 1, "updated": 0, "unchanged": 0},
+            )
+            self.assertEqual(
+                db.store_domain_rows("wake_energy", revised),
+                {"inserted": 0, "updated": 1, "unchanged": 0},
+            )
+            stored = db.connection.execute(
+                "SELECT bio_charge_wake FROM wake_energy"
+            ).fetchall()
+            self.assertEqual([row[0] for row in stored], [74.0])
+            db.close()
+
+    def test_multiple_wake_samples_with_distinct_offsets_are_retained(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Database(Path(directory) / "zepp.db")
+            rows = [
+                {
+                    "date": "2026-07-24", "start_time": 1000, "s": offset,
+                    "sample_timestamp": 1000 + offset, "bioChargeWake": value,
+                    "raw_sample": {"s": offset, "bioChargeWake": value},
+                }
+                for offset, value in ((0, 70), (1000, 74))
+            ]
+            counts = db.store_domain_rows("wake_energy", rows)
+            self.assertEqual(counts["inserted"], 2)
+            self.assertEqual(
+                db.status()["record_counts"]["wake_energy"], 2
+            )
+            db.close()
+
+    def test_sync_conflates_raw_unrecognized_record_with_empty_domain_status(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Database(Path(directory) / "zepp.db")
+            responses = fixture_responses()
+            responses[("Charge", "wake_data")] = {
+                "items": [{"date": "2026-07-24", "value": {"newWrapper": {}}}]
+            }
+            result = sync_native_metrics(FakeClient(responses), db, 7)
+            wake = next(
+                row for row in result["domains"] if row["domain"] == "wake_energy"
+            )
+            self.assertEqual(wake["status"], "empty")
+            self.assertEqual(wake["records_retrieved"], 0)
+            raw = db.connection.execute(
+                "SELECT COUNT(*) FROM raw_payloads WHERE domain='wake_energy'"
+            ).fetchone()[0]
+            self.assertEqual(raw, 1)
+            db.close()
+
     def test_domain_failure_isolated_and_summary_json_safe(self):
         with tempfile.TemporaryDirectory() as directory:
             db = Database(Path(directory) / "zepp.db")

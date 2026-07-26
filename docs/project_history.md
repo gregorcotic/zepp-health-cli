@@ -54,3 +54,25 @@ Ownership: this app owns Zepp synchronization and database coverage facts.
 `general-context.json`; bridge logic is intentionally not placed here. Deploy
 and observe standalone first, then mirror into `coach-platform`, run its
 `test-all`, and resume C017.3. C018 remains deferred.
+
+## C018.1 — Wake Energy forensics
+
+Investigated the `Charge/wake_data` path without changing its normalization,
+freshness, or coaching semantics. Added a narrow sanitized
+`diagnose-wake-energy` command and characterization coverage for explicit dates,
+the Europe/Ljubljana midnight boundary, epoch seconds, sleep crossing midnight,
+missing/empty/multiple samples, unsupported wrappers, and same-day SQLite
+revision behavior.
+
+The investigation establishes current behavior, not the production root cause:
+wake samples inherit the parent event date; missing timezone defaults to UTC;
+timestamps are assumed to be epoch milliseconds; and the ordinary sync summary
+reports both an actually empty response and a nonempty unrecognized payload as
+`empty` with zero normalized records. Production watch/app/API evidence is still
+required before selecting a C018.2 fix.
+
+Repository provenance: `Charge/wake_data` and the observed wake field mapping
+first appeared in fork commit `beedc7a` after live validation. The configured
+upstream base commit `a466dfa` contains generic `Charge/real_data` access but no
+wake parser or BioCharge contract. Repository issue/code searches found no
+additional upstream explanation.

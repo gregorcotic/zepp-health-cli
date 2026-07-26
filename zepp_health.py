@@ -30,7 +30,14 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import requests
-from zepp_db import Database, backup_database, inspect_database_file, resolve_db_path, restore_database
+from zepp_db import (
+    FRESHNESS_TIMEZONE,
+    Database,
+    backup_database,
+    inspect_database_file,
+    resolve_db_path,
+    restore_database,
+)
 from zepp_ops import SyncLock, lock_is_held
 
 DEFAULT_HOST = "api-mifit-us3.zepp.com"
@@ -1219,6 +1226,226 @@ def normalize_wake_data(data: Any) -> list[dict[str, Any]]:
     )
 
 
+WAKE_DIAGNOSTIC_TIME_FIELDS = (
+    "date", "day", "dayId", "timestamp", "time", "startTime", "endTime",
+    "timezone", "timeZone", "tz", "utcOffset",
+)
+WAKE_DIAGNOSTIC_SAMPLE_FIELDS = (
+    "s", "timestamp", "time", "date", "day", "dayId", "startTime", "endTime",
+    "timezone", "timeZone", "tz", "utcOffset", "bioChargeWake", "wakeCharge",
+    "physicalWake", "mentalWake", "dailyFitnessScore", "stressFitnessScore",
+    "exertionScore",
+)
+WAKE_DIAGNOSTIC_STRUCTURAL_FIELDS = {
+    "value", "samples", "sample", "items", "data", "records", "result",
+}
+
+
+def _diagnostic_fields(
+    mapping: dict[str, Any], allowed: tuple[str, ...]
+) -> dict[str, Any]:
+    """Return only explicitly allow-listed wake/date fields."""
+    return {name: mapping[name] for name in allowed if name in mapping}
+
+
+def _diagnostic_unknown_keys(
+    mapping: dict[str, Any], allowed: tuple[str, ...]
+) -> list[str]:
+    """Preserve schema clues without exposing unknown values."""
+    known = set(allowed) | WAKE_DIAGNOSTIC_STRUCTURAL_FIELDS | {
+        "eventType", "subType", "event_type", "sub_type",
+    }
+    return sorted(str(key) for key in mapping if key not in known)
+
+
+def _diagnostic_iso(timestamp: Any, timezone_name: str | None) -> str | None:
+    parsed = _local_datetime(timestamp, timezone_name)
+    return parsed.isoformat() if parsed else None
+
+
+def diagnose_wake_energy_payload(
+    data: Any, *, display_timezone: str = "Europe/Ljubljana"
+) -> dict[str, Any]:
+    """Describe Charge/wake_data structure and current date resolution safely."""
+    records = _event_records(data)
+    report_records: list[dict[str, Any]] = []
+    normalized_total = 0
+    for record_index, record in enumerate(records):
+        value = record.get("value")
+        value_mapping = value if isinstance(value, dict) else {}
+        payload = _record_payload(record)
+        timezone_name = _record_timezone(payload)
+        parent_timestamp = _record_timestamp(record, payload)
+        normalized = normalize_wake_data({"items": [record]})
+        normalized_total += len(normalized)
+        samples = _sample_source(record, payload)
+        report_samples: list[dict[str, Any]] = []
+        for sample_index, sample in enumerate(samples):
+            normalized_row = normalized[sample_index] if sample_index < len(normalized) else None
+            raw_sample_timestamp = _first_value(
+                sample, "timestamp", "time", "startTime"
+            )
+            report_samples.append({
+                "sample_index": sample_index,
+                "fields": _diagnostic_fields(sample, WAKE_DIAGNOSTIC_SAMPLE_FIELDS),
+                "unknown_relevant_field_names": _diagnostic_unknown_keys(
+                    sample, WAKE_DIAGNOSTIC_SAMPLE_FIELDS
+                ),
+                "raw_sample_timestamp": raw_sample_timestamp,
+                "raw_sample_timestamp_local": _diagnostic_iso(
+                    raw_sample_timestamp, timezone_name or display_timezone
+                ),
+                "resolved_event_date": (
+                    normalized_row.get("date") if normalized_row else None
+                ),
+                "normalized_wake_energy_event_date": (
+                    normalized_row.get("date") if normalized_row else None
+                ),
+                "normalized_sample_timestamp": (
+                    normalized_row.get("sample_timestamp") if normalized_row else None
+                ),
+            })
+        # Direct wake fields become one fallback sample when samples are absent or
+        # empty. Make that behavior explicit without inventing a raw sample.
+        if not samples and normalized:
+            row = normalized[0]
+            report_samples.append({
+                "sample_index": None,
+                "source": "parent_fallback",
+                "fields": _diagnostic_fields(payload, WAKE_DIAGNOSTIC_SAMPLE_FIELDS),
+                "unknown_relevant_field_names": _diagnostic_unknown_keys(
+                    payload, WAKE_DIAGNOSTIC_SAMPLE_FIELDS
+                ),
+                "raw_sample_timestamp": None,
+                "raw_sample_timestamp_local": None,
+                "resolved_event_date": row.get("date"),
+                "normalized_wake_energy_event_date": row.get("date"),
+                "normalized_sample_timestamp": row.get("sample_timestamp"),
+            })
+        report_records.append({
+            "record_index": record_index,
+            "eventType": _first_value(payload, "eventType", "event_type"),
+            "subType": _first_value(payload, "subType", "sub_type"),
+            "raw_parent_fields": _diagnostic_fields(
+                record, WAKE_DIAGNOSTIC_TIME_FIELDS
+            ),
+            "raw_value_fields": _diagnostic_fields(
+                value_mapping, WAKE_DIAGNOSTIC_TIME_FIELDS
+            ),
+            "raw_parent_timestamp": parent_timestamp,
+            "raw_parent_timestamp_utc": _diagnostic_iso(parent_timestamp, "UTC"),
+            "raw_parent_timestamp_local": _diagnostic_iso(
+                parent_timestamp, timezone_name or display_timezone
+            ),
+            "raw_timezone": timezone_name,
+            "resolved_event_date": _record_date(record, payload),
+            "value_type": type(value).__name__,
+            "samples_present": "samples" in payload or "sample" in payload,
+            "sample_count": len(samples),
+            "normalized_row_count": len(normalized),
+            "unknown_parent_field_names": _diagnostic_unknown_keys(
+                record, WAKE_DIAGNOSTIC_TIME_FIELDS
+            ),
+            "unknown_value_field_names": _diagnostic_unknown_keys(
+                value_mapping, WAKE_DIAGNOSTIC_TIME_FIELDS + WAKE_FIELDS
+            ),
+            "samples": report_samples,
+        })
+    return {
+        "event_contract": {
+            "method": "GET",
+            "path": "/v2/users/me/events",
+            "eventType": "Charge",
+            "subType": "wake_data",
+        },
+        "privacy": (
+            "Allow-listed wake/date values only; unknown fields are names only. "
+            "Credentials, headers, cookies, user IDs, GPS, and unrelated records are omitted."
+        ),
+        "display_timezone": display_timezone,
+        "raw_record_count": len(records),
+        "normalized_row_count": normalized_total,
+        "records": report_records,
+    }
+
+
+def _wake_diagnostic_window(
+    from_date: str, to_date: str, timezone_name: str
+) -> tuple[int, int]:
+    start_day = date.fromisoformat(from_date)
+    end_day = date.fromisoformat(to_date)
+    if end_day < start_day:
+        raise ValueError("--to-date must not be before --from-date")
+    zone = ZoneInfo(timezone_name)
+    start = datetime.combine(start_day, datetime.min.time(), tzinfo=zone)
+    end = datetime.combine(
+        end_day + timedelta(days=1), datetime.min.time(), tzinfo=zone
+    )
+    return int(start.timestamp() * 1000), int(end.timestamp() * 1000)
+
+
+def _diagnostic_wake_db_rows(path: Path, from_date: str, to_date: str) -> list[dict[str, Any]]:
+    """Read a minimal wake-only view without migrating or modifying SQLite."""
+    if not path.is_file():
+        return []
+    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+    try:
+        rows = connection.execute(
+            """SELECT record_key, event_date, timestamp_ms, start_time_ms,
+                      sample_timestamp_ms, offset_ms, bio_charge_wake,
+                      wake_charge, physical_wake, mental_wake,
+                      daily_fitness_score, stress_fitness_score,
+                      exertion_score, updated_at
+               FROM wake_energy
+               WHERE event_date BETWEEN ? AND ?
+               ORDER BY event_date, COALESCE(sample_timestamp_ms, timestamp_ms),
+                        record_key""",
+            (from_date, to_date),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        connection.close()
+
+
+def cmd_diagnose_wake_energy(args: argparse.Namespace) -> None:
+    cfg = load_config()
+    display_timezone = (
+        args.timezone or cfg.get("timezone") or FRESHNESS_TIMEZONE
+    )
+    try:
+        from_ms, to_ms = _wake_diagnostic_window(
+            args.from_date, args.to_date, display_timezone
+        )
+    except (ValueError, KeyError) as exc:
+        sys.exit(f"Invalid diagnostic date range/timezone: {exc}")
+    client = _load_client()
+    payload = client.events(
+        "Charge", "wake_data", from_ms, to_ms, limit=args.limit
+    )
+    report = diagnose_wake_energy_payload(
+        payload, display_timezone=display_timezone
+    )
+    report["request"] = {
+        "from_date": args.from_date,
+        "to_date": args.to_date,
+        "from_ms": from_ms,
+        "to_ms": to_ms,
+        "timezone": display_timezone,
+        "limit": args.limit,
+        "reverse": 1,
+    }
+    db_path = resolve_db_path(getattr(args, "db_path", None), cfg)
+    report["sqlite"] = {
+        "database_path": str(db_path),
+        "database_exists": db_path.is_file(),
+        "wake_energy_rows": _diagnostic_wake_db_rows(
+            db_path, args.from_date, args.to_date
+        ),
+    }
+    _emit_json(report, args)
+
+
 def normalize_readiness_data(data: Any) -> list[dict[str, Any]]:
     """Normalize the native readiness/watch_score value without interpreting status."""
     rows = _normalize_value_records(
@@ -2183,6 +2410,21 @@ def main() -> None:
     _add_json(sp)
     sp.add_argument("--limit", type=int, default=2000)
     sp.set_defaults(func=cmd_wake_energy)
+
+    sp = sub.add_parser(
+        "diagnose-wake-energy",
+        help="Sanitized Charge/wake_data raw-versus-normalized date report",
+    )
+    _add_json(sp)
+    _add_db(sp)
+    sp.add_argument("--from-date", required=True, help="First local date YYYY-MM-DD")
+    sp.add_argument("--to-date", required=True, help="Last local date YYYY-MM-DD")
+    sp.add_argument(
+        "--timezone",
+        help="IANA timezone for request bounds/display (default config or Europe/Ljubljana)",
+    )
+    sp.add_argument("--limit", type=int, default=200)
+    sp.set_defaults(func=cmd_diagnose_wake_energy)
 
     sp = sub.add_parser("exertion", help="Zepp exertion algo_result metrics")
     _add_days(sp)
