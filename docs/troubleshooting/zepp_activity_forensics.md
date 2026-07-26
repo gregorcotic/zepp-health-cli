@@ -611,3 +611,22 @@ unsupported rather than filling them with assumptions.
 
 C017 remains paused through the activity-source decision. Garmin remains a
 separate deferred native-data audit after the Zepp architecture stabilizes.
+
+## Z001.4 activity-quality design
+
+The factual quality and source-trust contract is documented in
+`docs/activity_data_quality.md`. No production Ojstrica payload accompanied
+Z001.4, so no correction threshold, ascent algorithm, sentinel mapping, or
+`diagnose-activity-quality` command was implemented.
+
+Ojstrica remains the required anomaly fixture, paired with one normal Hike.
+The operator must capture both `need_sub_data` modes by exact track ID.
+Summary elevation fields remain separate and raw; coordinate-bearing stream
+counts establish validation feasibility but do not by themselves produce a
+canonical ascent.
+
+The existing activity diagnostic is the evidence collector. The future
+quality layer will preserve raw values, attach independent evidence, select a
+value only under a proven rule, and expose factual status/confidence/reason.
+Strava is optional validation/enrichment and its absence cannot block Zepp
+ingestion. C017 remains paused.

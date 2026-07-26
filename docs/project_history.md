@@ -210,3 +210,24 @@ observed behavior, candidate mappings, and unknowns while excluding secrets,
 private notes, personal activities, user IDs, and GPS coordinates. No
 production output accompanied Z001.3, so RPE/TE/notes/sub-data and outdoor
 capabilities remain pending rather than inferred. C017 stays paused.
+
+## Z001.4 — Activity data quality and source-trust design
+
+Defined a source-traceable quality architecture before implementing activity
+corrections. Each metric retains its raw vendor value and field, independent
+validation evidence, any selected factual value, qualitative confidence,
+quality status, flags, and reason. Strava is optional evidence and never an
+automatic authority or ingestion dependency.
+
+No Ojstrica production payload was provided, and the repository contains no
+proven activity meaning for candidate negative values `-1`, `-100`, `-20000`,
+or `-274`. Consequently no sentinel conversion, elevation threshold, naive
+altitude summation, correction algorithm, or quality CLI was added. The
+documented production plan pairs Ojstrica with a normal Hike and captures both
+sub-data modes by exact track ID before calibration.
+
+Documented sport-aware checks, raw-versus-validated separation, qualitative
+statuses/confidence, optional Zepp–Strava matching, the future coach contract,
+and the intended public Zepp-native platform. Ojstrica remains the mandatory
+Z001.4/Z001.5 anomaly fixture. C017 remains paused; no downstream, production,
+Strava, Garmin, or repository-structure change was made.
