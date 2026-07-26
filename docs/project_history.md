@@ -162,3 +162,27 @@ the record because `summary` was not a recognized wrapper; this was corrected
 with a production-shaped privacy regression test. Field population, units,
 sport routing, cursor semantics, and historical stability remain unproven
 until the sanitized command is rerun.
+
+## Z001.2 — Cross-training activity deep dive
+
+Production matched `trackid=1784739852`, `type=130`, local start around 19:04,
+2623 seconds, 259 kcal, average/max/min HR 89/121/71, and training load 4 to
+the user's July 22 Cross-training workout. Because this non-running workout
+came from `/v1/sport/run/history.json`, that route is proven broader than
+literal runs but is not yet proven to be complete generic history. Type 130 is
+recorded only as a fixture-backed Cross-training mapping.
+
+Expanded the sanitized diagnostic for native RPE, training effects, workout
+balance, strength scores/groups, cardiac/muscular/total exertion, CrossFit
+content, and coach insight. Known nested containers now expose bounded safe
+scalar values and authorized text. Corrected the prior GPS overstatement:
+`location` is metadata, while GPS requires actual coordinate-bearing track
+samples. No verified detail or Workout Notes endpoint was found locally,
+upstream, in repository issues, or in searched public code.
+
+Paired `need_sub_data=0/1` production captures are still required to determine
+embedded details and verify app RPE 5, aerobic TE 0.3, Workout Balance 0/100,
+exertion, and the known manual notes. A one-day Hike capture through the
+already proven `/run/` route is the next outdoor capability gate. C017 remains
+paused because the outcome can materially change future repository and service
+boundaries; no downstream or Strava behavior changed.

@@ -628,6 +628,19 @@ ACTIVITY_SAFE_SCALAR_HINTS = (
     "recovery", "vo2", "pai", "step", "stroke", "swolf", "lap", "split",
     "pool", "temperature", "moving", "elapsed", "epoc",
 )
+ACTIVITY_COACHING_FIELDS = (
+    "rpe", "te", "anaerobic_te", "exercise_load", "workoutBalance",
+    "strengthScores", "strength_training_group", "totalCardiacExertion",
+    "totalMuscularExertion", "totalExertion", "totalInsight",
+    "crossfitContent", "coachInsight",
+)
+ACTIVITY_NESTED_DETAIL_FIELDS = (
+    "child_list", "add_info", "originSummary", "strengthScores",
+    "workoutBalance", "location",
+)
+ACTIVITY_COORDINATE_KEYS = {
+    "lat", "latitude", "lon", "lng", "longitude",
+}
 
 
 def _activity_records(data: Any) -> list[dict[str, Any]]:
@@ -680,70 +693,182 @@ def _activity_shape(value: Any, *, depth: int = 0) -> dict[str, Any]:
     return {"type": type(value).__name__}
 
 
+def _activity_sensitive_key(key: str) -> bool:
+    lower_key = key.lower()
+    return any(
+        marker in lower_key
+        for marker in (
+            "token", "authorization", "cookie", "userid", "user_id",
+            "deviceid", "device_id", "devicesn", "device_sn", "secret",
+            "downloadurl", "fileurl", "download_url", "file_url",
+            "accountid", "account_id", "ownerid", "owner_id", "memberid",
+            "member_id", "profileid", "profile_id", "url",
+        )
+    ) or lower_key in {"uid"}
+
+
+def _activity_text_value(value: Any, *, include_text: bool) -> Any:
+    if include_text:
+        return value
+    return {
+        "present": value not in (None, ""),
+        "length": len(str(value)) if value not in (None, "") else 0,
+        "type": type(value).__name__,
+    }
+
+
+def _activity_safe_nested(
+    value: Any, *, include_text: bool, depth: int = 0
+) -> dict[str, Any]:
+    """Expose bounded nested coaching structure without coordinates or identifiers."""
+    if isinstance(value, list):
+        result: dict[str, Any] = {"type": "list", "count": len(value)}
+        if depth < 2:
+            result["samples"] = [
+                _activity_safe_nested(item, include_text=include_text, depth=depth + 1)
+                for item in value[:3]
+            ]
+        return result
+    if isinstance(value, dict):
+        scalar_values: dict[str, Any] = {}
+        text_values: dict[str, Any] = {}
+        nested: dict[str, Any] = {}
+        omitted_fields: list[str] = []
+        for raw_key, item in list(value.items())[:50]:
+            key = str(raw_key)
+            lower_key = key.lower()
+            if _activity_sensitive_key(key) or lower_key in ACTIVITY_COORDINATE_KEYS:
+                omitted_fields.append(key)
+            elif isinstance(item, (dict, list)):
+                if depth < 2:
+                    nested[key] = _activity_safe_nested(
+                        item, include_text=include_text, depth=depth + 1
+                    )
+            elif isinstance(item, str):
+                text_values[key] = _activity_text_value(
+                    item, include_text=include_text
+                )
+            elif isinstance(item, (int, float, bool)) or item is None:
+                scalar_values[key] = item
+        result = {
+            "type": "object",
+            "field_names": sorted(str(key) for key in value),
+            "scalar_values": scalar_values,
+            "text_values": text_values,
+        }
+        if nested:
+            result["nested"] = nested
+        if omitted_fields:
+            result["omitted_field_names"] = sorted(omitted_fields)
+        return result
+    if isinstance(value, str):
+        return {
+            "type": "str",
+            "text": _activity_text_value(value, include_text=include_text),
+        }
+    return {"type": type(value).__name__, "value": value}
+
+
+def _activity_gps_track_evidence(record: dict[str, Any]) -> dict[str, Any]:
+    point_count = 0
+    track_fields: set[str] = set()
+
+    def inspect(value: Any, *, parent_key: str = "", depth: int = 0) -> None:
+        nonlocal point_count
+        if depth > 4 or parent_key.lower() == "location":
+            return
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    lower_fields = {str(key).lower() for key in item}
+                    has_lat = bool(lower_fields & {"lat", "latitude"})
+                    has_lon = bool(lower_fields & {"lon", "lng", "longitude"})
+                    if has_lat and has_lon:
+                        point_count += 1
+                        track_fields.update(str(key) for key in item)
+                    else:
+                        inspect(item, parent_key=parent_key, depth=depth + 1)
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                inspect(item, parent_key=str(key), depth=depth + 1)
+
+    inspect(record)
+    return {
+        "gps_track_present": point_count > 0,
+        "gps_point_count": point_count,
+        "track_field_names": sorted(track_fields),
+    }
+
+
 def _activity_summary(
     record: dict[str, Any], *, include_text: bool = False
 ) -> dict[str, Any]:
     scalars: dict[str, Any] = {}
     text: dict[str, Any] = {}
     nested: dict[str, Any] = {}
-    gps_fields: list[str] = []
+    coaching_fields: dict[str, Any] = {}
+    location_metadata: dict[str, Any] = {"present": False}
     omitted_sensitive: list[str] = []
     unknown_scalar_fields: list[str] = []
+    text_field_names = {item.lower() for item in ACTIVITY_TEXT_FIELDS}
+    coaching_field_names = {item.lower() for item in ACTIVITY_COACHING_FIELDS}
+    detail_field_names = {item.lower() for item in ACTIVITY_NESTED_DETAIL_FIELDS}
     for raw_key, value in record.items():
         key = str(raw_key)
         lower_key = key.lower()
-        if any(
-            marker in lower_key
-            for marker in (
-                "token", "authorization", "cookie", "userid", "user_id",
-                "deviceid", "device_id", "devicesn", "device_sn", "secret",
-                "downloadurl", "fileurl", "download_url", "file_url",
-                "accountid", "account_id", "ownerid", "owner_id", "memberid",
-                "member_id", "profileid", "profile_id", "url",
-            )
-        ) or lower_key in {"uid"}:
+        if _activity_sensitive_key(key):
             omitted_sensitive.append(key)
             continue
-        if any(
-            marker in lower_key
-            for marker in (
-                "latitude", "longitude", "coordinate", "location", "polyline",
-                "gps", "route",
-            )
-        ) or lower_key in {"lat", "lon", "lng"}:
-            gps_fields.append(key)
-            if isinstance(value, list):
-                nested[key] = {"type": "list", "count": len(value)}
-            elif isinstance(value, dict):
-                nested[key] = {
-                    "type": "object", "field_names": sorted(str(k) for k in value)
-                }
+        if lower_key == "location":
+            location_metadata = {
+                "present": value not in (None, "", [], {}),
+                "structure": _activity_safe_nested(
+                    value, include_text=False
+                ),
+            }
+            nested[key] = location_metadata["structure"]
             continue
-        if key in ACTIVITY_TEXT_FIELDS or lower_key in {
-            item.lower() for item in ACTIVITY_TEXT_FIELDS
-        }:
-            text[key] = (
-                value
-                if include_text
-                else {
-                    "present": value not in (None, ""),
-                    "length": len(str(value)) if value not in (None, "") else 0,
-                }
+        if lower_key in coaching_field_names:
+            if isinstance(value, (dict, list)):
+                coaching_fields[key] = _activity_safe_nested(
+                    value, include_text=include_text
+                )
+            elif isinstance(value, str):
+                coaching_fields[key] = _activity_text_value(
+                    value, include_text=include_text
+                )
+            else:
+                coaching_fields[key] = value
+            if lower_key in text_field_names:
+                text[key] = _activity_text_value(
+                    value, include_text=include_text
+                )
+            continue
+        if lower_key in text_field_names:
+            text[key] = _activity_text_value(
+                value, include_text=include_text
             )
         elif isinstance(value, (dict, list)):
-            nested[key] = _activity_shape(value)
+            nested[key] = (
+                _activity_safe_nested(value, include_text=include_text)
+                if lower_key in detail_field_names
+                else _activity_shape(value)
+            )
         elif isinstance(value, (str, int, float, bool)) or value is None:
             if any(hint in lower_key for hint in ACTIVITY_SAFE_SCALAR_HINTS):
                 scalars[key] = value
             else:
                 unknown_scalar_fields.append(key)
+    gps = _activity_gps_track_evidence(record)
     return {
         "field_names": sorted(str(key) for key in record),
         "scalar_fields": scalars,
+        "coaching_fields": coaching_fields,
         "text_fields": text,
         "nested_structures": nested,
-        "gps_present": bool(gps_fields),
-        "gps_field_names": sorted(gps_fields),
+        "location_metadata": location_metadata,
+        "gps_present": gps["gps_track_present"],
+        **gps,
         "omitted_sensitive_field_names": sorted(omitted_sensitive),
         "unknown_scalar_field_names": sorted(unknown_scalar_fields),
     }
@@ -857,8 +982,9 @@ def cmd_diagnose_activities(args: argparse.Namespace) -> None:
             "output_record_limit_per_sport": args.limit,
         },
         "privacy": (
-            "Credentials, user/device identifiers, secret URLs, and GPS coordinate "
-            "values are omitted. Text content is omitted unless --include-text is explicit."
+            "Credentials, user/device identifiers, secret URLs, and coordinate "
+            "values are omitted. Location metadata does not imply a GPS track. Text "
+            "content is omitted unless --include-text is explicit."
         ),
         "sports": sports,
     }

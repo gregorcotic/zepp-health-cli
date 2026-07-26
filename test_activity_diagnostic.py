@@ -1,9 +1,11 @@
 import json
 import unittest
 from datetime import datetime
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from zepp_health import (
+    ZeppClient,
     _activity_diagnostic_window,
     diagnose_activity_payload,
 )
@@ -43,6 +45,12 @@ class ActivityDiagnosticTests(unittest.TestCase):
         self.assertEqual(record["text_fields"]["name"]["length"], 8)
         self.assertEqual(record["text_fields"]["description"]["present"], True)
         self.assertTrue(record["gps_present"])
+        self.assertTrue(record["gps_track_present"])
+        self.assertEqual(record["gps_point_count"], 2)
+        self.assertEqual(
+            record["track_field_names"],
+            ["altitude", "lat", "lon", "timestamp"],
+        )
         self.assertEqual(record["nested_structures"]["route"]["count"], 2)
         self.assertEqual(record["nested_structures"]["laps"]["count"], 1)
         self.assertIn("deviceId", record["omitted_sensitive_field_names"])
@@ -124,6 +132,25 @@ class ActivityDiagnosticTests(unittest.TestCase):
                     "elevationGain": 120,
                     "avg_heart_rate": 141,
                     "max_heart_rate": 171,
+                    "rpe": 5,
+                    "te": 0.3,
+                    "anaerobic_te": 0,
+                    "exercise_load": 4,
+                    "workoutBalance": {"cardiac": 0, "muscular": 100},
+                    "strengthScores": [{"exercise": "Deadlift", "score": 88}],
+                    "strength_training_group": 2,
+                    "totalCardiacExertion": 4,
+                    "totalMuscularExertion": 9,
+                    "totalExertion": 13,
+                    "totalInsight": 1,
+                    "coachInsight": "Private coaching text",
+                    "child_list": [{
+                        "reps": 5,
+                        "weight": 162.5,
+                        "exercise": "Deadlift",
+                    }],
+                    "add_info": {"rest_seconds": 90, "note": "Private note"},
+                    "originSummary": {"source_type": 130},
                     "deviceid": "private-device",
                     "location": "private-location",
                 }],
@@ -137,12 +164,33 @@ class ActivityDiagnosticTests(unittest.TestCase):
         self.assertEqual(record["scalar_fields"]["trackid"], 112233)
         self.assertEqual(record["scalar_fields"]["sport_mode"], 37)
         self.assertEqual(record["scalar_fields"]["elevationGain"], 120)
+        self.assertEqual(record["coaching_fields"]["rpe"], 5)
+        self.assertEqual(record["coaching_fields"]["te"], 0.3)
+        self.assertEqual(record["coaching_fields"]["exercise_load"], 4)
+        self.assertNotIn("rpe", record["unknown_scalar_field_names"])
+        self.assertNotIn("totalExertion", record["unknown_scalar_field_names"])
+        self.assertEqual(
+            record["coaching_fields"]["workoutBalance"]["scalar_values"],
+            {"cardiac": 0, "muscular": 100},
+        )
+        self.assertEqual(
+            record["nested_structures"]["child_list"]["samples"][0][
+                "scalar_values"
+            ],
+            {"reps": 5, "weight": 162.5},
+        )
         self.assertEqual(record["text_fields"]["sport_title"]["present"], True)
-        self.assertTrue(record["gps_present"])
+        self.assertFalse(record["gps_present"])
+        self.assertFalse(record["gps_track_present"])
+        self.assertEqual(record["gps_point_count"], 0)
+        self.assertTrue(record["location_metadata"]["present"])
         self.assertIn("deviceid", record["omitted_sensitive_field_names"])
         rendered = json.dumps(hidden)
         self.assertNotIn("Private title", rendered)
         self.assertNotIn("Deadlift 5x5", rendered)
+        self.assertNotIn("Private coaching text", rendered)
+        self.assertNotIn("Private note", rendered)
+        self.assertNotIn("Deadlift", rendered)
         self.assertNotIn("private-device", rendered)
         self.assertNotIn("private-location", rendered)
 
@@ -155,6 +203,48 @@ class ActivityDiagnosticTests(unittest.TestCase):
         self.assertEqual(
             shown["records"][0]["text_fields"]["crossfitContent"],
             "Deadlift 5x5",
+        )
+        self.assertEqual(
+            shown["records"][0]["coaching_fields"]["coachInsight"],
+            "Private coaching text",
+        )
+        self.assertEqual(
+            shown["records"][0]["nested_structures"]["child_list"]["samples"][0][
+                "text_values"
+            ]["exercise"],
+            "Deadlift",
+        )
+
+    def test_location_coordinates_are_metadata_not_a_gps_track(self) -> None:
+        payload = {
+            "data": {
+                "summary": [{
+                    "trackid": 1,
+                    "location": {"latitude": 46.1, "longitude": 14.2},
+                }]
+            }
+        }
+        record = diagnose_activity_payload(payload, sport_segment="run")["records"][0]
+        self.assertTrue(record["location_metadata"]["present"])
+        self.assertFalse(record["gps_track_present"])
+        self.assertEqual(record["gps_point_count"], 0)
+        self.assertNotIn("46.1", json.dumps(record))
+
+    def test_sport_history_passes_need_sub_data_without_changing_contract(self) -> None:
+        client = ZeppClient("private-token", "private-user", "example.invalid")
+        with patch.object(client, "get_json", return_value={"data": {}}) as get_json:
+            client.sport_history(
+                "run", 1784671200, 1784757599, need_sub_data=0
+            )
+        get_json.assert_called_once_with(
+            "/v1/sport/run/history.json",
+            {
+                "userid": "private-user",
+                "startTrackId": 1784671200,
+                "stopTrackId": 1784757599,
+                "need_sub_data": 0,
+                "type": "",
+            },
         )
 
 

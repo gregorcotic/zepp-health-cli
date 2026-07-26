@@ -1,6 +1,6 @@
 # Zepp activity/workout forensics
 
-Status: Z001.1 investigation. No activity source, coach contract, database, or
+Status: Z001.2 investigation. No activity source, coach contract, database, or
 production behavior changed.
 
 ## Evidence boundary
@@ -288,3 +288,161 @@ Zepp does not yet have enough proven cloud capability to replace Strava. The
 first production schema is promising, but populated values, units, sub-data
 shapes, sport routing, pagination, retention, titles/notes, and update
 stability still require evidence.
+
+## Z001.2 Cross-training production fixture
+
+The July 22 production record is conclusively the known Cross-training workout:
+
+| Evidence | Zepp API | Zepp app |
+|---|---:|---:|
+| local start | `trackid=1784739852`, approximately 19:04 Europe/Ljubljana | approximately 19:04 |
+| duration | `run_time=2623`; `totalTimeWithMillis=2623680` | 43:43 |
+| calories | `calorie=259` | 259 kcal |
+| average HR | `avg_heart_rate=89` | 89 bpm |
+| maximum HR | `max_heart_rate=121` | 121 bpm |
+| minimum HR | `min_heart_rate=71` | not supplied |
+| training load | `exercise_load=4` | 4 |
+| API type | `type=130` | Cross-training |
+| timezone | `syncedTimezone=Europe/Ljubljana` | Europe/Ljubljana |
+
+This proves that `/v1/sport/run/history.json` is **not restricted to literal
+running activities**. One non-running record is insufficient to prove that it
+is a complete generic history route. A Hike, ride, and swim returned by the
+same route would materially strengthen that hypothesis.
+
+For this fixture, `type=130` empirically identifies Cross-training. No
+authoritative enum mapping was found in this repository, upstream commit
+history, its issues, or the searched open-source Zepp/Huami code. Therefore
+`130 → Cross-training` is a fixture-backed mapping, not a guessed global enum.
+
+The app additionally displays RPE 5/Hard, aerobic Training Effect 0.3,
+anaerobic Training Effect 0, and Workout Balance 0/100. The supplied diagnostic
+did not expose the corresponding raw values, so `rpe`, `te`, and
+`workoutBalance` remain pending production confirmation. The diagnostic now
+places these exact fields in `coaching_fields` with native scalar types.
+
+The following fields are also explicitly reported in `coaching_fields`:
+
+```text
+rpe
+te
+anaerobic_te
+exercise_load
+workoutBalance
+strengthScores
+strength_training_group
+totalCardiacExertion
+totalMuscularExertion
+totalExertion
+totalInsight
+crossfitContent
+coachInsight
+```
+
+Nested values in `child_list`, `add_info`, `originSummary`, `strengthScores`,
+and `workoutBalance` are bounded to three sample items and two nested levels.
+The report includes native numeric/boolean/null scalar values, field names,
+counts, and explicitly authorized text. Coordinate values and user/device
+identifiers remain suppressed.
+
+`crossfitContent=""` and `sport_title=""` in the first extracted record do not
+prove that Zepp Workout Notes are unavailable. The known note contains
+`Evening Crossfit`, `DEADLIFT`, `162.5`, `PRESS`, and `65`; the next narrow
+`--include-text` capture must check `crossfitContent`, `coachInsight`,
+`add_info`, `originSummary`, `child_list`, and any newly exposed text fields.
+No repository, upstream, issue, or public code evidence identified a separate
+note endpoint or one of the searched note/remark/memo field names.
+
+### Correct GPS semantics
+
+`location` is treated as location metadata only. It no longer sets
+`gps_present`. A GPS track is reported only when a non-location nested list
+contains records with both latitude and longitude keys:
+
+```text
+gps_track_present
+gps_point_count
+track_field_names
+```
+
+`gps_present` remains as a compatibility alias for `gps_track_present`. An
+indoor Cross-training activity with a nonempty `location` can therefore
+correctly report location metadata while `gps_track_present=false`.
+
+### Sub-data and detail endpoint status
+
+The client sends `need_sub_data` exactly as 0 or 1. No local/upstream method,
+historical commit, repository issue, or searched public Zepp/Huami source
+identified a verified separate detail endpoint for `trackid=1784739852`.
+Endpoint-shaped guesses were not implemented.
+
+The existing summary contains possible embedded detail containers:
+`child_list`, `add_info`, `originSummary`, `strengthScores`, and `location`.
+Only a paired response comparison for the same date and track with
+`need_sub_data=0` and `1` can establish what the flag adds.
+
+### Exact read-only Cross-training probes
+
+Run both commands against the same fixture and compare only the record whose
+`trackid` is `1784739852`:
+
+```bash
+python3 zepp_health.py diagnose-activities \
+  --from-date 2026-07-22 --to-date 2026-07-22 \
+  --timezone Europe/Ljubljana \
+  --sport run --limit 20 --need-sub-data 0 --include-text --json
+
+python3 zepp_health.py diagnose-activities \
+  --from-date 2026-07-22 --to-date 2026-07-22 \
+  --timezone Europe/Ljubljana \
+  --sport run --limit 20 --need-sub-data 1 --include-text --json
+```
+
+The output is read-only but contains the explicitly requested private workout
+text. Keep it private. Search the single record for the five known note tokens;
+do not dump unrelated records or coordinates.
+
+### Exact read-only Hike probe template
+
+Set the date to the local calendar day of one known recent Hike; keep the
+window to that single day:
+
+```bash
+HIKE_DATE=YYYY-MM-DD
+python3 zepp_health.py diagnose-activities \
+  --from-date "$HIKE_DATE" --to-date "$HIKE_DATE" \
+  --timezone Europe/Ljubljana \
+  --sport run --limit 20 --need-sub-data 1 --include-text --json
+```
+
+The `/run/` route is intentional because it already returned Cross-training.
+For the matching Hike record inspect `type`, `sport_mode`, `trackid`,
+`sport_title`, times, duration, distance, ascent/descent, altitude, HR,
+calories, load/effect/RPE, nested structures, and the three GPS evidence
+fields. Do not infer track availability from `location`.
+
+### Strategic comparison after the fixture
+
+- **Potential Zepp-native advantage:** RPE, training load, aerobic/anaerobic
+  effect, workout balance, cardiac/muscular exertion, and structured strength
+  data. Only training load is value-matched so far; the rest remain pending.
+- **Equivalent and verified:** duration, calories, average/max HR, local
+  timezone, and a source activity ID candidate.
+- **Current Strava advantage:** proven activity name, description/notes,
+  established activity IDs, historical synchronization, update semantics, and
+  outdoor streams/elevation in the existing coach architecture.
+- **Unresolved:** Zepp Workout Notes, populated strength structures, GPS,
+  laps/streams, generic-route coverage, pagination, retention, and update
+  stability.
+
+The recommendation remains Option A while evidence is incomplete. Option B
+becomes credible if the Hike and sub-data probes succeed. Option C requires
+notes or an adequate structured replacement, outdoor GPS/elevation, reliable
+history/pagination, stable IDs, and update behavior.
+
+C017 remains paused because choosing a Zepp-only or multi-source activity
+architecture changes the intended monorepo/service boundaries. No repository
+restructure should precede the Z001 decision. A future Garmin coach should
+likewise prefer independently proven Garmin-native health and activity data
+over a mandatory Strava dependency; Garmin parity is not assumed or part of
+this implementation.
