@@ -127,3 +127,28 @@ C018 is complete. C018.2 changed only the value of the existing
 Action, OpenAPI schema, token, URL, or Custom GPT import is required. Existing
 C017 monorepo mirroring remains separate planned work and may resume after this
 standalone closeout.
+
+## Z001.1 — Zepp activity-source forensics
+
+Audited the inherited reverse-engineered workout interface without changing
+health synchronization, persistence, coaching, or Strava. The only implemented
+cloud workout path is a sport-specific
+`GET /v1/sport/{sport}/history.json` request. It has no pagination loop,
+generic all-sports mode, normalizer, database table, or captured response
+fixture. `run`, `walking`, `ride`, and `swimming` occur as URL-segment
+candidates in repository code/documentation; they are not a complete or
+production-validated sport mapping.
+
+Added `diagnose-activities`, a narrow read-only structural probe. It suppresses
+credentials, user/device identifiers, URL values, GPS coordinates, and
+title/note text by default while reporting field names, safe summary scalars,
+nested counts, and sample shapes. Synthetic tests characterize privacy and
+shape handling but do not assert an unobserved Zepp schema.
+
+Current conclusion: Zepp cannot yet be designated the authoritative activity
+source. Critical cloud capabilities—including stable activity IDs, titles,
+notes, strength details, tracks, elevation, workout HR, laps, update/deletion
+semantics, pagination, and historical retention—remain unknown until a small
+production probe captures representative Hike, strength/CrossFit, cycling, and
+swimming responses. The existing Zepp-health plus Strava-activities
+architecture remains unchanged.

@@ -80,6 +80,10 @@ python3 zepp_health.py weight --days 90
 python3 zepp_health.py vo2 --days 30
 python3 zepp_health.py run-history
 python3 zepp_health.py run-history --sport walking   # if your app uses that segment
+python3 zepp_health.py diagnose-activities \
+  --from-date 2026-07-20 --to-date 2026-07-26 \
+  --timezone Europe/Ljubljana \
+  --sport run --sport walking --limit 20 --json
 
 # Sleep / steps / band payload (large JSON; often base64-encoded blobs)
 python3 zepp_health.py band-data --days 14
@@ -196,6 +200,7 @@ All data requests are **GET**s to your regional `host`, with header `apptoken: <
 | `heart-rate` | `GET /users/{id}/heartRate` |
 | `weight` | `GET /users/{id}/members/-1/weightRecords` |
 | `run-history` | `GET /v1/sport/{sport}/history.json` (default `sport=run`) |
+| `diagnose-activities` | Same sport-specific endpoint, with sanitized field/shape reporting for a narrow local-date window |
 | `band-data` | `GET /v1/data/band_data.json` (sleep/steps sync payload; often large) |
 | `manual-data` | `GET /v1/user/manualData.json` |
 | `user-info` | `GET /huami.health.getUserInfo.json` |
@@ -334,6 +339,11 @@ Zepp/Huami expose **`skinTempCalibrated`** as a *delta from your personal baseli
 - **Region matters.** Use the host from your own capture (e.g. `api-mifit-us3.zepp.com`, `api-mifit-cn.zepp.com`, …). Calling the wrong regional host returns 403 or empty data.
 - **Token expires.** Captured tokens have a TTL of ~30 days; after that, redo `init` with a fresh proxy capture.
 - **Not every Zepp screen is covered.** New commands follow paths seen in HTTPS proxy captures. If an endpoint 404s (e.g. `run-history --sport hiking`), capture that screen in your proxy and check the real path segment.
+- **Workout support is forensic, not authoritative.** The repository has a
+  sport-specific history request but no production payload fixture, generic
+  all-sports history implementation, pagination loop, or activity database.
+  `diagnose-activities` reports structure without GPS coordinates or private
+  text by default; its `--limit` limits output only, not the server response.
 - **No write operations.** This wrapper only reads.
 
 ## Contributing

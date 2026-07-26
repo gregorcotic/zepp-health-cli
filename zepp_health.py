@@ -611,6 +611,241 @@ def cmd_run_history(args: argparse.Namespace) -> None:
     _emit_json(data, args)
 
 
+ACTIVITY_RECORD_WRAPPERS = (
+    "items", "data", "records", "result", "trackList", "tracks", "sportData",
+)
+ACTIVITY_TEXT_FIELDS = {
+    "name", "title", "description", "note", "notes", "remark", "comment",
+    "memo", "workoutName", "sportName",
+}
+ACTIVITY_SAFE_SCALAR_HINTS = (
+    "id", "sport", "type", "mode", "start", "end", "time", "date",
+    "duration", "distance", "elevation", "altitude", "ascent", "descent",
+    "climb", "heartrate", "heart_rate", "hr", "calorie", "speed", "pace",
+    "cadence", "power", "load", "aerobic", "anaerobic", "training",
+    "recovery", "vo2", "pai", "step", "stroke", "swolf", "lap", "split",
+    "pool", "temperature", "moving", "elapsed", "epoc",
+)
+
+
+def _activity_records(data: Any) -> list[dict[str, Any]]:
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    if not isinstance(data, dict):
+        return []
+    for key in ACTIVITY_RECORD_WRAPPERS:
+        value = data.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+        if isinstance(value, dict):
+            nested = _activity_records(value)
+            if nested:
+                return nested
+    return []
+
+
+def _activity_shape(value: Any, *, depth: int = 0) -> dict[str, Any]:
+    """Describe payload structure without emitting nested health/GPS values."""
+    if isinstance(value, list):
+        dictionaries = [item for item in value if isinstance(item, dict)]
+        shape: dict[str, Any] = {
+            "type": "list",
+            "count": len(value),
+        }
+        if dictionaries:
+            shape["sample_field_names"] = sorted(
+                {str(key) for item in dictionaries[:3] for key in item}
+            )
+            if depth < 2:
+                shape["sample_structure"] = _activity_shape(
+                    dictionaries[0], depth=depth + 1
+                )
+        return shape
+    if isinstance(value, dict):
+        shape = {
+            "type": "object",
+            "field_names": sorted(str(key) for key in value),
+        }
+        if depth < 2:
+            nested = {
+                str(key): _activity_shape(item, depth=depth + 1)
+                for key, item in value.items()
+                if isinstance(item, (dict, list))
+            }
+            if nested:
+                shape["nested"] = nested
+        return shape
+    return {"type": type(value).__name__}
+
+
+def _activity_summary(
+    record: dict[str, Any], *, include_text: bool = False
+) -> dict[str, Any]:
+    scalars: dict[str, Any] = {}
+    text: dict[str, Any] = {}
+    nested: dict[str, Any] = {}
+    gps_fields: list[str] = []
+    omitted_sensitive: list[str] = []
+    unknown_scalar_fields: list[str] = []
+    for raw_key, value in record.items():
+        key = str(raw_key)
+        lower_key = key.lower()
+        if any(
+            marker in lower_key
+            for marker in (
+                "token", "authorization", "cookie", "userid", "user_id",
+                "deviceid", "device_id", "devicesn", "device_sn", "secret",
+                "downloadurl", "fileurl", "download_url", "file_url",
+                "accountid", "account_id", "ownerid", "owner_id", "memberid",
+                "member_id", "profileid", "profile_id", "url",
+            )
+        ) or lower_key in {"uid"}:
+            omitted_sensitive.append(key)
+            continue
+        if any(
+            marker in lower_key
+            for marker in (
+                "latitude", "longitude", "coordinate", "location", "polyline",
+                "gps", "route",
+            )
+        ) or lower_key in {"lat", "lon", "lng"}:
+            gps_fields.append(key)
+            if isinstance(value, list):
+                nested[key] = {"type": "list", "count": len(value)}
+            elif isinstance(value, dict):
+                nested[key] = {
+                    "type": "object", "field_names": sorted(str(k) for k in value)
+                }
+            continue
+        if key in ACTIVITY_TEXT_FIELDS or lower_key in {
+            item.lower() for item in ACTIVITY_TEXT_FIELDS
+        }:
+            text[key] = (
+                value
+                if include_text
+                else {
+                    "present": value not in (None, ""),
+                    "length": len(str(value)) if value not in (None, "") else 0,
+                }
+            )
+        elif isinstance(value, (dict, list)):
+            nested[key] = _activity_shape(value)
+        elif isinstance(value, (str, int, float, bool)) or value is None:
+            if any(hint in lower_key for hint in ACTIVITY_SAFE_SCALAR_HINTS):
+                scalars[key] = value
+            else:
+                unknown_scalar_fields.append(key)
+    return {
+        "field_names": sorted(str(key) for key in record),
+        "scalar_fields": scalars,
+        "text_fields": text,
+        "nested_structures": nested,
+        "gps_present": bool(gps_fields),
+        "gps_field_names": sorted(gps_fields),
+        "omitted_sensitive_field_names": sorted(omitted_sensitive),
+        "unknown_scalar_field_names": sorted(unknown_scalar_fields),
+    }
+
+
+def diagnose_activity_payload(
+    data: Any,
+    *,
+    sport_segment: str,
+    limit: int = 20,
+    include_text: bool = False,
+) -> dict[str, Any]:
+    if limit < 1:
+        raise ValueError("activity diagnostic limit must be at least 1")
+    records = _activity_records(data)
+    return {
+        "sport_segment": sport_segment,
+        "raw_record_count": len(records),
+        "reported_record_count": min(len(records), limit),
+        "response_structure": _activity_shape(data),
+        "records": [
+            _activity_summary(record, include_text=include_text)
+            for record in records[:limit]
+        ],
+    }
+
+
+def _activity_diagnostic_window(
+    from_date: str, to_date: str, timezone_name: str
+) -> tuple[int, int]:
+    start_day = date.fromisoformat(from_date)
+    end_day = date.fromisoformat(to_date)
+    if end_day < start_day:
+        raise ValueError("--to-date must not be before --from-date")
+    zone = ZoneInfo(timezone_name)
+    start = datetime.combine(start_day, datetime.min.time(), tzinfo=zone)
+    end = datetime.combine(
+        end_day, datetime.max.time().replace(microsecond=0), tzinfo=zone
+    )
+    return int(start.timestamp()), int(end.timestamp())
+
+
+def cmd_diagnose_activities(args: argparse.Namespace) -> None:
+    if args.limit < 1:
+        sys.exit("--limit must be at least 1")
+    timezone_name = args.timezone or load_config().get("timezone") or FRESHNESS_TIMEZONE
+    try:
+        start_track_id, stop_track_id = _activity_diagnostic_window(
+            args.from_date, args.to_date, timezone_name
+        )
+    except (ValueError, KeyError) as exc:
+        sys.exit(f"Invalid activity diagnostic date range/timezone: {exc}")
+    client = _load_client()
+    sports: list[dict[str, Any]] = []
+    for sport in args.sport:
+        try:
+            payload = client.sport_history(
+                sport,
+                start_track_id,
+                stop_track_id,
+                need_sub_data=args.need_sub_data,
+            )
+            result = diagnose_activity_payload(
+                payload,
+                sport_segment=sport,
+                limit=args.limit,
+                include_text=args.include_text,
+            )
+            result["request_status"] = "ok"
+        except requests.RequestException as exc:
+            result = {
+                "sport_segment": sport,
+                "request_status": "error",
+                "error": type(exc).__name__,
+            }
+        sports.append(result)
+    report = {
+        "endpoint_contract": {
+            "method": "GET",
+            "path_template": "/v1/sport/{sport}/history.json",
+            "query_parameters": [
+                "userid", "startTrackId", "stopTrackId", "need_sub_data", "type", "r"
+            ],
+            "pagination": "none_implemented",
+            "server_limit_parameter": "none",
+        },
+        "request": {
+            "from_date": args.from_date,
+            "to_date": args.to_date,
+            "timezone": timezone_name,
+            "startTrackId": start_track_id,
+            "stopTrackId": stop_track_id,
+            "need_sub_data": args.need_sub_data,
+            "output_record_limit_per_sport": args.limit,
+        },
+        "privacy": (
+            "Credentials, user/device identifiers, secret URLs, and GPS coordinate "
+            "values are omitted. Text content is omitted unless --include-text is explicit."
+        ),
+        "sports": sports,
+    }
+    _emit_json(report, args)
+
+
 def cmd_band_data(args: argparse.Namespace) -> None:
     c = _load_client()
     if args.from_date and args.to_date:
@@ -2463,6 +2698,43 @@ def main() -> None:
         help="URL segment: run, walking, ride, swimming, … (default run)",
     )
     sp.set_defaults(func=cmd_run_history)
+
+    sp = sub.add_parser(
+        "diagnose-activities",
+        help="Sanitized structural audit of sport-specific Zepp workout history",
+    )
+    _add_json(sp)
+    sp.add_argument("--from-date", required=True, help="First local date YYYY-MM-DD")
+    sp.add_argument("--to-date", required=True, help="Last local date YYYY-MM-DD")
+    sp.add_argument(
+        "--timezone",
+        help="IANA timezone for local bounds (default config or Europe/Ljubljana)",
+    )
+    sp.add_argument(
+        "--sport",
+        action="append",
+        required=True,
+        help="Exact /v1/sport/{sport}/ URL segment; repeat for multiple candidates",
+    )
+    sp.add_argument(
+        "--limit",
+        type=int,
+        default=20,
+        help="Maximum records reported per sport; this is not a server query parameter",
+    )
+    sp.add_argument(
+        "--need-sub-data",
+        type=int,
+        choices=(0, 1),
+        default=1,
+        help="Request Zepp sub-data (default 1)",
+    )
+    sp.add_argument(
+        "--include-text",
+        action="store_true",
+        help="Explicitly include title/description/note values; omitted by default",
+    )
+    sp.set_defaults(func=cmd_diagnose_activities)
 
     sp = sub.add_parser("summary", help="Brief text summary")
     _add_days(sp)
