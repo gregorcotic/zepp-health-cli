@@ -76,3 +76,30 @@ first appeared in fork commit `beedc7a` after live validation. The configured
 upstream base commit `a466dfa` contains generic `Charge/real_data` access but no
 wake parser or BioCharge contract. Repository issue/code searches found no
 additional upstream explanation.
+
+## C018.2 — Proven local wake-day correction
+
+Production evidence for July 23–26 classified the stale Wake BioCharge as
+Case C, not a cloud delay. Three raw records each contained one extracted wake
+sample. For the latest record, the parent timestamp resolved to July 25 UTC,
+but `value.startTime=1785016800000` with
+`timeZone=1,Europe/Ljubljana` represented July 26 00:00 local. The record was
+retrieved by the July 26 morning sync, yet the old generic resolver stored it
+as July 25.
+
+The operator's July 24 09:03 app comparison independently confirmed the
+semantics: Zepp displayed Wake BioCharge 65 and distinct Current BioCharge 55.
+The raw record with parent July 23, local `startTime` July 24, and
+`wakeCharge=65` was therefore the July 24 wake value, not a July 23 value.
+
+The fix is wake-specific: it recognizes the observed Zepp timezone prefix and
+uses an explicit sample date first, then an explicit sample timestamp or
+`value.startTime + s` in that timezone, then the existing parent-date fallback.
+No generic event resolver, freshness rule, morning requirement, endpoint,
+schema, current Charge mapping, epoch-unit handling, or UTC-offset handling was
+changed. The last two were not present in the production evidence.
+
+The three affected derived `wake_energy` rows require a guarded in-place
+record-key/date repair before resynchronization. Their sanitized raw payloads
+and sync history remain intact; no schema migration or historical rebuild is
+required.

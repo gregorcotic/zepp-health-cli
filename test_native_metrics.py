@@ -86,6 +86,46 @@ class NativeMetricsTests(unittest.TestCase):
         self.assertEqual(without_timezone[0]["date"], "2026-07-23")
         self.assertEqual(with_timezone[0]["date"], "2026-07-24")
 
+    def test_production_prefixed_timezone_uses_local_start_time_wake_day(self) -> None:
+        rows = normalize_wake_data({"items": [{
+            "eventType": "Charge",
+            "subType": "wake_data",
+            "timestamp": 1784764800000,
+            "value": {
+                "startTime": 1784844000000,
+                "timeZone": "1,Europe/Ljubljana",
+                "samples": [{
+                    "s": 0,
+                    "bioChargeWake": 64.12416,
+                    "wakeCharge": 65,
+                }],
+            },
+        }]})
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["timestamp"], 1784764800000)
+        self.assertEqual(rows[0]["sample_timestamp"], 1784844000000)
+        self.assertEqual(rows[0]["wakeCharge"], 65)
+        self.assertEqual(rows[0]["date"], "2026-07-24")
+
+    def test_production_prefixed_timezone_diagnostic_compares_old_and_wake_dates(self) -> None:
+        report = diagnose_wake_energy_payload({"items": [{
+            "timestamp": 1784937600000,
+            "value": {
+                "startTime": 1785016800000,
+                "timeZone": "1,Europe/Ljubljana",
+                "samples": [{"s": 0, "bioChargeWake": 63.938446}],
+            },
+        }]})
+        record = report["records"][0]
+        self.assertEqual(record["raw_timezone"], "1,Europe/Ljubljana")
+        self.assertEqual(record["effective_timezone"], "Europe/Ljubljana")
+        self.assertEqual(record["generic_parent_date"], "2026-07-25")
+        self.assertEqual(record["resolved_event_date"], "2026-07-26")
+        self.assertEqual(
+            record["samples"][0]["normalized_wake_energy_event_date"],
+            "2026-07-26",
+        )
+
     def test_wake_data_epoch_seconds_are_treated_as_milliseconds(self) -> None:
         timestamp_seconds = int(datetime(
             2026, 7, 24, 0, 30, tzinfo=ZoneInfo("Europe/Ljubljana")

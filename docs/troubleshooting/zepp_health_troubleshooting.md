@@ -80,7 +80,7 @@ an opaque `r` request UUID. Timezone is sent as the normal Zepp request header,
 not as an events query parameter. The diagnostic converts inclusive local
 calendar bounds to a half-open UTC epoch-millisecond range.
 
-Current date precedence is exact and intentionally unchanged:
+Generic event date precedence remains:
 
 1. The merged payload checks `date`, then `day`, then `dayId`. Top-level record
    fields overwrite same-named fields inside `value`.
@@ -90,9 +90,21 @@ Current date precedence is exact and intentionally unchanged:
    interpreted as milliseconds.
 4. `timezone`, `timeZone`, then `tz` selects an IANA zone. Missing or invalid
    timezone means UTC. `utcOffset` is not used.
-5. A sample's own date or timestamp never selects `event_date`. Samples inherit
-   the parent date. `sample_timestamp` is `parent startTime + sample s` when
-   both are numeric, otherwise the parent timestamp.
+5. Generic sample domains inherit the parent date. `sample_timestamp` is
+   `parent startTime + sample s` when both are numeric, otherwise the parent
+   timestamp.
+
+Wake data now has a narrow, evidence-based override:
+
+1. explicit sample `date`, `day`, or `dayId`;
+2. explicit sample `timestamp`, `time`, or `startTime` in an explicit timezone;
+3. `value.startTime + sample s` in an explicit timezone;
+4. the existing resolved parent date.
+
+The production timezone was `1,Europe/Ljubljana`; the numeric prefix is Zepp
+metadata and the suffix is the IANA timezone. This parsing applies only to wake
+data. Production timestamps were milliseconds and no `utcOffset` was present,
+so epoch-unit and offset semantics were not changed.
 
 Supported shapes are `value.samples` as a list or object, plus direct wake
 fields in the merged `value`/record when samples are absent or empty. Direct
@@ -112,6 +124,117 @@ At the July DST boundary, `2026-07-24 00:30 Europe/Ljubljana` is
 - a July 23 parent with a July 24 wake sample → `2026-07-23`;
 - the equivalent epoch-seconds value is treated as milliseconds and resolves
   near January 1970.
+
+### C018.2 production evidence and result
+
+The July 23–26 capture contained three raw records and three normalized rows;
+the API was not empty and the parser extracted every sample. SQLite retained
+exactly those three normalized rows. This excludes Cases A, D, and E.
+
+Each record showed the same one-day pattern. The latest example was:
+
+- parent `timestamp=1784937600000` → July 25 UTC;
+- `value.startTime=1785016800000`;
+- `timeZone=1,Europe/Ljubljana`;
+- sample `s=0`;
+- local wake clock → July 26 00:00 Europe/Ljubljana;
+- old normalized/stored date → July 25;
+- stored at `2026-07-26T06:30:05Z`.
+
+At 09:03 Europe/Ljubljana on July 24, the Zepp app showed Wake BioCharge 65
+and Current BioCharge 55. The matching API wake sample had `wakeCharge=65`,
+parent timestamp July 23, and local `startTime` July 24. This proves both the
+wake-day date and that current Charge is a separate value.
+
+The root cause is therefore Case C: the generic parent-date resolver ignored
+the wake clock and could not parse Zepp's prefixed timezone. After the fix the
+same raw record normalizes to July 26. The value remains Wake BioCharge at
+waking; current/intraday BioCharge is not substituted.
+
+### Targeted production repair after deployment
+
+Stop the timer so corrected rows cannot be inserted before the key move. Back
+up first, verify the three exact source rows, then move their derived identities
+in one transaction. This preserves the rows, values, `updated_at`, raw payloads,
+and sync history:
+
+```bash
+cd /opt/zepp-health-cli
+sudo systemctl stop zepp-health-sync.timer
+
+.venv/bin/python zepp_health.py db-backup \
+  --db /opt/zepp-health-cli/data/zepp_health.db \
+  --output /opt/zepp-health-cli/backups/pre-c0182-wake-energy.db --json
+
+sqlite3 -readonly -json /opt/zepp-health-cli/data/zepp_health.db \
+  "SELECT record_key,event_date,start_time_ms,offset_ms,bio_charge_wake,updated_at
+     FROM wake_energy
+    WHERE record_key IN (
+      'aff7e57568369f17443ea4073fefaf710f6701e02b681e65ff145f21cb32fa34',
+      '7f2a6540a4e80714cfbaceaae54ee9ad11949ed1ad30a04938674f3ec5946da5',
+      'eca0e86c28463b809ea1339953185f1686a11402332856f6f1fc4e667b7cb395'
+    )
+    ORDER BY event_date;"
+
+sqlite3 /opt/zepp-health-cli/data/zepp_health.db <<'SQL'
+.bail on
+BEGIN IMMEDIATE;
+CREATE TEMP TABLE repair_guard(n INTEGER CHECK(n=1));
+UPDATE wake_energy
+   SET record_key='1e49c413d1e661abd6c97ae8ccccdb64b0f443c6ecf34ed62a675241f108bb19',
+       event_date='2026-07-24'
+ WHERE record_key='aff7e57568369f17443ea4073fefaf710f6701e02b681e65ff145f21cb32fa34'
+   AND event_date='2026-07-23' AND start_time_ms=1784844000000 AND offset_ms=0;
+INSERT INTO repair_guard VALUES(changes());
+UPDATE wake_energy
+   SET record_key='08ad258b2d1bcd34a010035f93a7f9240ad0bc763c9f663fb83cc26f8220a1aa',
+       event_date='2026-07-25'
+ WHERE record_key='7f2a6540a4e80714cfbaceaae54ee9ad11949ed1ad30a04938674f3ec5946da5'
+   AND event_date='2026-07-24' AND start_time_ms=1784930400000 AND offset_ms=0;
+INSERT INTO repair_guard VALUES(changes());
+UPDATE wake_energy
+   SET record_key='48facbdc1c79c7cd2d2b5afd59dcbb5b78ff130c23b76a04d70a9c6567342e65',
+       event_date='2026-07-26'
+ WHERE record_key='eca0e86c28463b809ea1339953185f1686a11402332856f6f1fc4e667b7cb395'
+   AND event_date='2026-07-25' AND start_time_ms=1785016800000 AND offset_ms=0;
+INSERT INTO repair_guard VALUES(changes());
+COMMIT;
+SQL
+
+.venv/bin/python zepp_health.py sync-db \
+  --days 7 --db /opt/zepp-health-cli/data/zepp_health.db --json
+sudo systemctl start zepp-health-sync.timer
+```
+
+If the read-only precheck does not return exactly the three documented rows,
+stop and restore nothing; investigate before opening a write transaction. The
+`.bail on` plus the temporary `CHECK(n=1)` guard aborts the sqlite3 process if
+an UPDATE does not affect exactly one row, leaving the transaction uncommitted.
+Do not run this repair on another database or capture.
+
+Validate afterward:
+
+```bash
+.venv/bin/python zepp_health.py diagnose-wake-energy \
+  --from-date 2026-07-23 --to-date 2026-07-26 \
+  --timezone Europe/Ljubljana \
+  --db /opt/zepp-health-cli/data/zepp_health.db --json \
+  | jq '{raw_record_count,normalized_row_count,
+         dates:[.records[] |
+           {generic_parent_date,effective_timezone,resolved_event_date,
+            normalized:[.samples[].normalized_wake_energy_event_date]}],
+         sqlite:.sqlite.wake_energy_rows}'
+
+.venv/bin/python zepp_health.py sync-health \
+  --db /opt/zepp-health-cli/data/zepp_health.db --json \
+  | jq '.factual_freshness |
+        {sync_freshness,
+         wake_energy:.domain_data_freshness.wake_energy,
+         morning_data_status}'
+
+.venv/bin/python zepp_health.py db-check \
+  --db /opt/zepp-health-cli/data/zepp_health.db --json
+```
 
 SQLite uses logical key SHA-256 of
 `("wake", event_date, start_time, s)`. A changed value with that same identity

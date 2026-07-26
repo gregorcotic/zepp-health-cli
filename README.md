@@ -281,6 +281,14 @@ aggregate it into daily averages or scores. `Charge/summary` returned a
 different battery/charge series (`minCharge`, `maxCharge`, and cumulative
 charging/consumption fields), not a BioCharge daily summary.
 
+Production C018.2 evidence established that wake records use a parent
+`timestamp` for the preceding UTC day while `value.startTime`, sample offset
+`s`, and a Zepp-prefixed timezone such as `1,Europe/Ljubljana` identify the
+actual local wake day. Wake normalization therefore resolves `event_date`
+specifically from that local wake clock. Generic event date handling is
+unchanged. Wake BioCharge remains distinct from current/intraday
+`Charge/real_data`.
+
 `diagnose-wake-energy` is intended for forensic use. It prints only allow-listed
 wake/date values and unknown field names, never request headers, credentials,
 cookies, user IDs, GPS, or unrelated event domains. Its date range is inclusive

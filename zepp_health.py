@@ -1107,6 +1107,7 @@ def _normalize_sample_records(
     fields: tuple[str, ...],
     *,
     confidence: str = "candidate",
+    sample_date_resolver: Any = None,
 ) -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
     provenance = _provenance(event_type, sub_type, confidence)
@@ -1125,8 +1126,15 @@ def _normalize_sample_records(
                 if isinstance(parent_start, (int, float)) and isinstance(offset, (int, float))
                 else parent_timestamp
             )
+            event_date = (
+                sample_date_resolver(
+                    record, payload, sample, parent_date, sample_timestamp
+                )
+                if sample_date_resolver
+                else parent_date
+            )
             item: dict[str, Any] = {
-                "date": parent_date,
+                "date": event_date,
                 "timestamp": parent_timestamp,
                 "start_time": parent_start,
                 "sample_timestamp": sample_timestamp,
@@ -1222,8 +1230,73 @@ READINESS_FIELDS = (
 def normalize_wake_data(data: Any) -> list[dict[str, Any]]:
     """Normalize Charge/wake_data samples, which are nested under value.samples."""
     return _normalize_sample_records(
-        data, "Charge", "wake_data", WAKE_FIELDS, confidence="confirmed"
+        data,
+        "Charge",
+        "wake_data",
+        WAKE_FIELDS,
+        confidence="confirmed",
+        sample_date_resolver=_wake_sample_date,
     )
+
+
+def _wake_timezone_name(value: Any) -> str | None:
+    """Parse the exact Zepp wake_data timezone forms observed in production."""
+    if not value:
+        return None
+    timezone_name = str(value).strip()
+    if "," in timezone_name:
+        prefix, candidate = timezone_name.split(",", 1)
+        if prefix.isdigit() and candidate:
+            timezone_name = candidate
+    try:
+        ZoneInfo(timezone_name)
+    except (KeyError, ValueError):
+        return None
+    return timezone_name
+
+
+def _wake_sample_date(
+    record: dict[str, Any],
+    payload: dict[str, Any],
+    sample: dict[str, Any],
+    parent_date: str | None,
+    sample_timestamp: Any,
+) -> str | None:
+    """Resolve Charge/wake_data to the local wake day, not its parent UTC day."""
+    explicit_sample_day = _first_value(sample, "date", "day", "dayId")
+    if explicit_sample_day is not None:
+        return str(explicit_sample_day)
+
+    raw_timezone = _first_value(
+        sample, "timezone", "timeZone", "tz",
+        default=_first_value(payload, "timezone", "timeZone", "tz"),
+    )
+    timezone_name = _wake_timezone_name(raw_timezone)
+    explicit_sample_timestamp = _as_number(
+        _first_value(sample, "timestamp", "time", "startTime")
+    )
+    wake_timestamp = (
+        explicit_sample_timestamp
+        if isinstance(explicit_sample_timestamp, (int, float))
+        else sample_timestamp
+    )
+    parent_start = _as_number(
+        _first_value(payload, "startTime", "start_time", "start")
+    )
+    offset = _as_number(_first_value(sample, "s", "start_offset_ms"))
+    has_wake_clock = (
+        isinstance(explicit_sample_timestamp, (int, float))
+        or (
+            isinstance(parent_start, (int, float))
+            and isinstance(offset, (int, float))
+        )
+    )
+    if has_wake_clock and timezone_name:
+        wake_local = _local_datetime(wake_timestamp, timezone_name)
+        if wake_local:
+            return wake_local.date().isoformat()
+
+    return parent_date
 
 
 WAKE_DIAGNOSTIC_TIME_FIELDS = (
@@ -1274,7 +1347,8 @@ def diagnose_wake_energy_payload(
         value = record.get("value")
         value_mapping = value if isinstance(value, dict) else {}
         payload = _record_payload(record)
-        timezone_name = _record_timezone(payload)
+        raw_timezone = _record_timezone(payload)
+        timezone_name = _wake_timezone_name(raw_timezone)
         parent_timestamp = _record_timestamp(record, payload)
         normalized = normalize_wake_data({"items": [record]})
         normalized_total += len(normalized)
@@ -1337,8 +1411,14 @@ def diagnose_wake_energy_payload(
             "raw_parent_timestamp_local": _diagnostic_iso(
                 parent_timestamp, timezone_name or display_timezone
             ),
-            "raw_timezone": timezone_name,
-            "resolved_event_date": _record_date(record, payload),
+            "raw_timezone": raw_timezone,
+            "effective_timezone": timezone_name,
+            "generic_parent_date": _record_date(record, payload),
+            "resolved_event_date": (
+                normalized[0].get("date")
+                if normalized
+                else _record_date(record, payload)
+            ),
             "value_type": type(value).__name__,
             "samples_present": "samples" in payload or "sample" in payload,
             "sample_count": len(samples),
