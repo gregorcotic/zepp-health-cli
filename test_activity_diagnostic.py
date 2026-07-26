@@ -105,6 +105,58 @@ class ActivityDiagnosticTests(unittest.TestCase):
             "unexpected", report["response_structure"]["field_names"]
         )
 
+    def test_production_data_summary_wrapper_is_extracted_and_sanitized(self) -> None:
+        payload = {
+            "code": 1,
+            "message": "success",
+            "data": {
+                "next": 1784671200,
+                "summary": [{
+                    "trackid": 112233,
+                    "parent_trackid": 0,
+                    "sport_mode": 37,
+                    "type": 9,
+                    "sport_title": "Private title",
+                    "crossfitContent": "Deadlift 5x5",
+                    "start_time": 1784700000,
+                    "end_time": 1784703600,
+                    "dis": 2500,
+                    "elevationGain": 120,
+                    "avg_heart_rate": 141,
+                    "max_heart_rate": 171,
+                    "deviceid": "private-device",
+                    "location": "private-location",
+                }],
+            },
+        }
+        hidden = diagnose_activity_payload(payload, sport_segment="run")
+        self.assertEqual(hidden["raw_record_count"], 1)
+        self.assertEqual(hidden["response_metadata"]["record_wrapper"], "data.summary")
+        self.assertEqual(hidden["response_metadata"]["next"], 1784671200)
+        record = hidden["records"][0]
+        self.assertEqual(record["scalar_fields"]["trackid"], 112233)
+        self.assertEqual(record["scalar_fields"]["sport_mode"], 37)
+        self.assertEqual(record["scalar_fields"]["elevationGain"], 120)
+        self.assertEqual(record["text_fields"]["sport_title"]["present"], True)
+        self.assertTrue(record["gps_present"])
+        self.assertIn("deviceid", record["omitted_sensitive_field_names"])
+        rendered = json.dumps(hidden)
+        self.assertNotIn("Private title", rendered)
+        self.assertNotIn("Deadlift 5x5", rendered)
+        self.assertNotIn("private-device", rendered)
+        self.assertNotIn("private-location", rendered)
+
+        shown = diagnose_activity_payload(
+            payload, sport_segment="run", include_text=True
+        )
+        self.assertEqual(
+            shown["records"][0]["text_fields"]["sport_title"], "Private title"
+        )
+        self.assertEqual(
+            shown["records"][0]["text_fields"]["crossfitContent"],
+            "Deadlift 5x5",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

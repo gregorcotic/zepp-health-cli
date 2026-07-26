@@ -52,6 +52,74 @@ No generic endpoint returning all sports was found in source, history,
 documentation, configured upstream, or repository discussions. This means
 "not found", not proof that Zepp has no such private endpoint.
 
+## First production response: 2026-07-22
+
+A narrow production probe established the actual success wrapper:
+
+```text
+code
+message
+data.next
+data.summary[]
+```
+
+The `run` segment returned HTTP success and one object in `data.summary`.
+The initial Z001.1 diagnostic described that object's field names but reported
+zero records because `summary` was not yet a recognized record wrapper. This
+was a diagnostic-parser limitation, not an empty Zepp response. The parser now
+supports the observed wrapper.
+
+The same request bounds returned HTTP errors for `walking`, `ride`,
+`swimming`, `training`, `strength`, `cross_training`, `indoor`, and `fitness`.
+Because the first diagnostic emitted only the exception class, those results
+do not reveal whether the status was 400, 404, or another error. Current
+diagnostics include the numeric HTTP status without response bodies, URLs, or
+headers.
+
+The successful field-name schema proves that the cloud summary contract has
+slots for substantially more than basic running totals. Observed exact names
+include:
+
+- identity/type/time: `trackid`, `parent_trackid`, `thirdPartyWorkoutId`,
+  `sport_mode`, `type`, `sport_title`, `displayType`, `source`, `start_time`,
+  `end_time`, `createTime`, `updateTime`, `syncedTimezone`;
+- duration/distance/elevation: `run_time`, `pause_time`, `dis`,
+  `totalTimeWithMillis`, `exerciseTimeWithMillis`, `elevationGain`,
+  `elevationLoss`, `altitude_ascend`, `altitude_descend`, `distance_ascend`,
+  `max_altitude`, `min_altitude`, `avg_altitude`;
+- heart/effort/training: `avg_heart_rate`, `max_heart_rate`,
+  `min_heart_rate`, `heart_range`, `exercise_load`, `te`, `anaerobic_te`,
+  `VO2_max`, `rpe`, `totalExertion`, `totalCardiacExertion`,
+  `totalMuscularExertion`, `coachInsight`;
+- pace/motion/environment: `avg_pace`, `max_pace`, `min_pace`,
+  `avg_cadence`, `max_cadence`, `avg_stride_length`, `average_power`,
+  `max_power`, `avg_slope`, `max_slope`, `avg_temperature`,
+  `max_temperature`, `min_temperature`, `averageAirTemp`,
+  `highestAirTemp`, `lowestAirTemp`, `weatherInfo`;
+- running/hiking/downhill: `lap_distance`, `runningType`, `runningProgram`,
+  `climb_dis_ascend_time`, `climb_dis_descend_time`,
+  `climb_dis_descend`, `downhill_num`,
+  `downhill_max_altitude_desend`, `durationOfDownhillWithMillis`;
+- strength/CrossFit: `crossfitContent`, `strengthScores`,
+  `strength_training_group`, `total_group`, `workoutBalance`,
+  `difficultySystem`, `highestDifficulty`, `hyroxRace`;
+- swimming: `swim_pool_length`, `swim_style`, `swolf`, `strokes`,
+  `total_strokes`, `totalStrokes`, `avg_distance_per_stroke`,
+  `avg_stroke_speed`, `max_stroke_speed`, and per-stroke-style length fields;
+- other structures/candidates: `child_list`, `add_info`, `originSummary`,
+  `location`, `feature`, `pb`, `marathon`, `totalInsight`, and
+  `thirdPartyDataSource`.
+
+Field presence in the schema does not prove that a value is populated for the
+observed activity, establish its units, or prove that `child_list`,
+`add_info`, or `location` contains laps/streams/GPS. The first output did not
+extract scalar values. A rerun is required to identify the activity represented
+by `sport_mode`, `type`, `trackid`, and `sport_title`, and to determine whether
+the `/run/` segment is sport-specific or a practical aggregate entry point.
+
+`data.next` is now proven to exist. Its cursor meaning and termination rules
+remain UNKNOWN; the client still performs one request and does not paginate.
+
 ## Cloud capability matrix
 
 The table describes the reverse-engineered cloud interface, not data shown on
@@ -61,24 +129,24 @@ the watch/app and not Zepp OS device APIs.
 |---|---|---|---|---|
 | Sport-specific activity listing | PARTIAL | `/v1/sport/{sport}/history.json` | medium: request exists, payload unverified | YES |
 | Generic all-sports history | UNKNOWN | no endpoint found | low | YES |
-| Stable activity ID | UNKNOWN | query names mention TrackId only | low | YES |
+| Stable activity ID | PARTIAL | `trackid` and `parent_trackid` schema fields | low: values/repeat stability pending | YES |
 | Sport type/subtype mapping | PARTIAL | four URL-segment candidates | low | YES |
-| Name/custom title | UNKNOWN | no response fixture | low | YES |
+| Name/custom title | PARTIAL | `sport_title` and `app_name` fields | low: values/rename pending | YES |
 | Description/notes | UNKNOWN | no response fixture | low | YES |
 | Start/local time/timezone | UNKNOWN | no response fixture | low | YES |
 | Duration/moving/elapsed time | UNKNOWN | no response fixture | low | YES |
 | Distance | UNKNOWN | no response fixture | low | YES |
-| Ascent/descent/min/max altitude | UNKNOWN | no response fixture | low | ascent |
+| Ascent/descent/min/max altitude | PARTIAL | explicit summary field names | low: population/units pending | ascent |
 | Calories | UNKNOWN | no response fixture | low | YES |
-| Average/max/min HR | UNKNOWN | no response fixture | low | average/max |
+| Average/max/min HR | PARTIAL | explicit summary field names | low: values/units pending | average/max |
 | Workout HR stream | UNKNOWN | no response fixture | low | YES where available |
-| Speed/pace/cadence/power | UNKNOWN | no response fixture | low | PARTIAL/YES by activity |
-| Training load/aerobic TE/anaerobic TE/recovery/VO2max/EPOC | UNKNOWN | no response fixture | low | PARTIAL |
+| Speed/pace/cadence/power | PARTIAL | pace/cadence/power schema fields | low: population/units pending | PARTIAL/YES by activity |
+| Training load/aerobic TE/anaerobic TE/recovery/VO2max/EPOC | PARTIAL | load/TE/VO2 fields; recovery/EPOC unproven | low | PARTIAL |
 | GPS/altitude track | UNKNOWN | no response fixture | low | YES where available |
 | Laps/splits/intervals | UNKNOWN | no response fixture | low | PARTIAL |
-| Strength exercises/sets/reps/weight/rest/muscles/corrections | UNKNOWN | no response fixture | low | descriptions only in current architecture |
-| Swim pool length/laps/strokes/SWOLF/intervals | UNKNOWN | no response fixture | low | PARTIAL |
-| Full-history pagination/retention | UNKNOWN | no pagination implementation | low | YES within authorized history |
+| Strength exercises/sets/reps/weight/rest/muscles/corrections | PARTIAL | CrossFit/strength container fields only | low: shapes/values pending | descriptions only in current architecture |
+| Swim pool length/laps/strokes/SWOLF/intervals | PARTIAL | pool/stroke/SWOLF fields; laps/intervals unproven | low | PARTIAL |
+| Full-history pagination/retention | PARTIAL | `data.next` exists; no loop or semantics | low | YES within authorized history |
 | Update and deletion semantics | UNKNOWN | no persistence or repeated captures | low | source IDs and updates available |
 
 Official Zepp OS documentation is useful only as a discovery aid. Its
@@ -216,6 +284,7 @@ must not implement deletion synchronization.
    details, tracks/elevation, identifiers, pagination, and retention remain
    unknown.
 
-Zepp does not currently have enough proven cloud capability to replace Strava.
-The largest unknown is the response itself: no production activity payload has
-yet been captured in this project.
+Zepp does not yet have enough proven cloud capability to replace Strava. The
+first production schema is promising, but populated values, units, sub-data
+shapes, sport routing, pagination, retention, titles/notes, and update
+stability still require evidence.

@@ -152,3 +152,13 @@ semantics, pagination, and historical retention—remain unknown until a small
 production probe captures representative Hike, strength/CrossFit, cycling, and
 swimming responses. The existing Zepp-health plus Strava-activities
 architecture remains unchanged.
+
+The first production probe subsequently returned one real record under
+`data.summary[]` from the `run` segment. Its field-name schema includes stable-ID
+candidates, sport/title, distance/elevation, HR, pace/cadence/power,
+training-effect, CrossFit/strength, swimming, and `data.next` pagination
+candidates. The initial diagnostic exposed the structure but failed to count
+the record because `summary` was not a recognized wrapper; this was corrected
+with a production-shaped privacy regression test. Field population, units,
+sport routing, cursor semantics, and historical stability remain unproven
+until the sanitized command is rerun.

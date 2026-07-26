@@ -612,11 +612,13 @@ def cmd_run_history(args: argparse.Namespace) -> None:
 
 
 ACTIVITY_RECORD_WRAPPERS = (
-    "items", "data", "records", "result", "trackList", "tracks", "sportData",
+    "items", "data", "summary", "records", "result", "trackList", "tracks",
+    "sportData",
 )
 ACTIVITY_TEXT_FIELDS = {
     "name", "title", "description", "note", "notes", "remark", "comment",
-    "memo", "workoutName", "sportName",
+    "memo", "workoutName", "sportName", "sport_title", "app_name",
+    "crossfitContent", "coachInsight",
 }
 ACTIVITY_SAFE_SCALAR_HINTS = (
     "id", "sport", "type", "mode", "start", "end", "time", "date",
@@ -757,10 +759,25 @@ def diagnose_activity_payload(
     if limit < 1:
         raise ValueError("activity diagnostic limit must be at least 1")
     records = _activity_records(data)
+    response_metadata: dict[str, Any] = {}
+    if isinstance(data, dict):
+        if "code" in data and (
+            isinstance(data.get("code"), (int, float, bool)) or data.get("code") is None
+        ):
+            response_metadata["code"] = data.get("code")
+        response_data = data.get("data")
+        if isinstance(response_data, dict):
+            if "summary" in response_data and isinstance(response_data["summary"], list):
+                response_metadata["record_wrapper"] = "data.summary"
+            if "next" in response_data:
+                next_cursor = response_data.get("next")
+                if isinstance(next_cursor, (int, float, bool)) or next_cursor is None:
+                    response_metadata["next"] = next_cursor
     return {
         "sport_segment": sport_segment,
         "raw_record_count": len(records),
         "reported_record_count": min(len(records), limit),
+        "response_metadata": response_metadata,
         "response_structure": _activity_shape(data),
         "records": [
             _activity_summary(record, include_text=include_text)
@@ -817,6 +834,8 @@ def cmd_diagnose_activities(args: argparse.Namespace) -> None:
                 "request_status": "error",
                 "error": type(exc).__name__,
             }
+            if exc.response is not None:
+                result["http_status"] = exc.response.status_code
         sports.append(result)
     report = {
         "endpoint_contract": {
