@@ -339,3 +339,24 @@ remain known app data whose API location is undiscovered.
 No mapping or downstream system changed. C017 remains paused; the recommended
 next investigation is the shared activity detail/track contract because it
 gates advanced capabilities across multiple otherwise usable sports.
+
+## Z001.9 — raw activity detail discovery
+
+Re-audited the current tree, every local commit, configured upstream, and
+public implementations. Current/upstream code contains only history access,
+but maintained public exporter code and an independent walkthrough both use
+`GET /v1/sport/run/detail.json` with the history record's `trackid` and
+`source`. The public model includes compact GPS, time, altitude, HR, speed,
+pace, cadence, lap, stroke, coaching, and power fields.
+
+Added a single bounded `diagnose-activity-detail` command. It discovers
+`source` internally from exact history, makes one grounded detail request, and
+reports only sanitized structure, counts, candidate timestamp/altitude/HR
+summaries, note-like paths/lengths, and sport identity. Coordinates, text,
+source values, credentials, URLs, and identifiers outside the selected
+activity are omitted. The contract remains
+`OBSERVED_IN_PUBLIC_IMPLEMENTATION` until operator production probes verify
+current availability and sport-specific population.
+
+No canonical storage, downstream integration, production write, deployment,
+or source substitution was added. C017 remains paused.

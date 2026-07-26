@@ -120,5 +120,19 @@ basic-coaching level.
 Advanced analysis remains incomplete. Route reconstruction, native elevation
 validation, workout-HR streams, swim intervals, cycling power streams, and
 structured strength/body-region analysis require a detail/track contract not
-yet discovered. Strava can optionally add titles, notes, routes, GPX access,
+yet verified in production. Strava can optionally add titles, notes, routes,
+GPX access,
 and cross-source validation without becoming a normal-operation dependency.
+
+## Z001.9 detail-contract discovery
+
+Public exporter code establishes a credible
+`GET /v1/sport/run/detail.json` contract using the history summary's
+`trackid` and `source`. Its modeled fields cover compact route, altitude, HR,
+speed, pace, cadence, lap, stroke, coaching, and power containers. This
+upgrades detail availability from unsupported guess to
+`OBSERVED_IN_PUBLIC_IMPLEMENTATION`; per-sport/current-account population
+remains `UNKNOWN` until the sanitized production probes run.
+
+History summary sufficiency is unchanged. A failed or empty detail probe would
+limit advanced analysis, not basic coach ingestion.

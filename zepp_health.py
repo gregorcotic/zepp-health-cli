@@ -258,6 +258,16 @@ class ZeppClient:
             "run", start_track_id, stop_track_id, need_sub_data=need_sub_data
         )
 
+    def sport_detail(self, track_id: str | int, source: str) -> Any:
+        """Workout detail contract observed in public Zepp exporter code."""
+        return self.get_json(
+            "/v1/sport/run/detail.json",
+            {
+                "trackid": track_id,
+                "source": source,
+            },
+        )
+
     def band_data(
         self,
         from_date: date,
@@ -1874,6 +1884,271 @@ def compare_activity_sub_data_payloads(
     }
 
 
+ACTIVITY_DETAIL_STREAM_FIELDS = (
+    "longitude_latitude", "time", "altitude", "air_pressure_altitude",
+    "correct_altitude", "heart_rate", "speed", "pace", "gait", "cadence",
+    "power_meter", "lap", "kilo_pace", "mile_pace", "stroke_speed",
+    "coaching_segment", "pause", "distance", "accuracy", "spo2", "flag",
+    "bearing", "course", "daily_performance_info",
+    "rope_skipping_frequency", "weather_info", "golf_swing_rt_data",
+)
+ACTIVITY_DETAIL_TEXT_KEYS = {
+    "name", "title", "description", "note", "notes", "remark", "remarks",
+    "comment", "comments", "memo", "content", "sport_note", "workout_note",
+    "workoutnotes", "track_note", "tracknote", "user_note", "usernote",
+}
+
+
+def _detail_entries(value: Any) -> list[Any]:
+    if isinstance(value, str):
+        return [item for item in value.split(";") if item != ""]
+    if isinstance(value, list):
+        return value
+    return [] if value in (None, "", {}, []) else [value]
+
+
+def _detail_numeric_series(value: Any) -> list[float]:
+    numbers: list[float] = []
+    for item in _detail_entries(value):
+        if isinstance(item, bool):
+            continue
+        try:
+            numbers.append(float(item))
+        except (TypeError, ValueError):
+            continue
+    return numbers
+
+
+def _detail_coordinate_sample_count(value: Any) -> tuple[int, bool]:
+    entries = _detail_entries(value)
+    valid_count = 0
+    for item in entries:
+        if not isinstance(item, str):
+            continue
+        components = item.split(",")
+        if len(components) < 2:
+            continue
+        try:
+            float(components[0])
+            float(components[1])
+        except ValueError:
+            continue
+        valid_count += 1
+    return valid_count, valid_count == len(entries)
+
+
+def _detail_stream_shape(value: Any) -> dict[str, Any]:
+    entries = _detail_entries(value)
+    widths: set[int] = set()
+    for item in entries[:100]:
+        if isinstance(item, str):
+            widths.add(len(item.split(",")))
+        elif isinstance(item, (list, tuple, dict)):
+            widths.add(len(item))
+        else:
+            widths.add(1)
+    return {
+        "present": bool(entries),
+        "sample_count": len(entries),
+        "encoded_length": len(value) if isinstance(value, str) else None,
+        "component_widths_observed": sorted(widths),
+        "encoding": (
+            "semicolon_records_comma_components"
+            if isinstance(value, str)
+            else type(value).__name__
+        ),
+    }
+
+
+def _detail_delta_pair_summary(value: Any) -> dict[str, Any]:
+    """Summarize delta-time/delta-value pairs without exposing raw samples."""
+    elapsed = 0
+    current_value = 0
+    values: list[int] = []
+    offsets: list[int] = []
+    valid = True
+    for item in _detail_entries(value):
+        if not isinstance(item, str):
+            valid = False
+            continue
+        components = item.split(",")
+        if len(components) < 2:
+            valid = False
+            continue
+        try:
+            elapsed += int(components[0] or 1)
+            current_value += int(components[1])
+        except ValueError:
+            valid = False
+            continue
+        offsets.append(elapsed)
+        values.append(current_value)
+    decoded = bool(values) and valid
+    return {
+        "decoded_using_public_exporter_delta_model": decoded,
+        "decoded_sample_count": len(values),
+        "offset_start": offsets[0] if decoded else None,
+        "offset_end": offsets[-1] if decoded else None,
+        "minimum": min(values) if decoded else None,
+        "maximum": max(values) if decoded else None,
+    }
+
+
+def _detail_text_metadata(
+    value: Any, *, path: str = "$", depth: int = 0
+) -> list[dict[str, Any]]:
+    if depth > 5:
+        return []
+    found: list[dict[str, Any]] = []
+    if isinstance(value, dict):
+        for raw_key, item in value.items():
+            key = str(raw_key)
+            child_path = f"{path}.{key}"
+            if key.lower() in ACTIVITY_DETAIL_TEXT_KEYS:
+                found.append({
+                    "path": child_path,
+                    "present": item not in (None, "", [], {}),
+                    "length": len(str(item)) if item not in (None, "") else 0,
+                    "value_type": type(item).__name__,
+                })
+            if isinstance(item, (dict, list)):
+                found.extend(
+                    _detail_text_metadata(item, path=child_path, depth=depth + 1)
+                )
+    elif isinstance(value, list):
+        for index, item in enumerate(value[:50]):
+            found.extend(
+                _detail_text_metadata(
+                    item, path=f"{path}[{index}]", depth=depth + 1
+                )
+            )
+    return found
+
+
+def diagnose_activity_detail_payload(
+    data: Any,
+    *,
+    expected_track_id: str | int,
+    summary_record: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Sanitize detail.json without emitting coordinates or private text."""
+    payload = data.get("data") if isinstance(data, dict) else None
+    if not isinstance(payload, dict):
+        return {
+            "recognized_wrapper": False,
+            "response_structure": _activity_shape(data),
+            "detail_track_id_matches": False,
+            "streams": {},
+            "workout_notes": {"present": False, "matches": []},
+        }
+
+    track_id = payload.get("trackid", payload.get("trackId"))
+    stream_shapes = {
+        field: _detail_stream_shape(payload.get(field))
+        for field in ACTIVITY_DETAIL_STREAM_FIELDS
+    }
+    time_values = _detail_numeric_series(payload.get("time"))
+    time_encoded_count = stream_shapes["time"]["sample_count"]
+    time_parse_complete = len(time_values) == time_encoded_count
+    cumulative_time: list[float] = []
+    elapsed = 0.0
+    for value in time_values:
+        elapsed += value
+        cumulative_time.append(elapsed)
+
+    altitude_values = _detail_numeric_series(payload.get("altitude"))
+    altitude_encoded_count = stream_shapes["altitude"]["sample_count"]
+    altitude_parse_complete = len(altitude_values) == altitude_encoded_count
+    gps_count, gps_parse_complete = _detail_coordinate_sample_count(
+        payload.get("longitude_latitude")
+    )
+    notes = _detail_text_metadata(payload)
+    source_present = payload.get("source") not in (None, "")
+    mapping = _activity_sport_mapping(summary_record or {})
+    return {
+        "recognized_wrapper": True,
+        "detail_track_id": track_id,
+        "detail_track_id_matches": str(track_id) == str(expected_track_id),
+        "source_parameter_returned": source_present,
+        "sport_mapping": mapping,
+        "response_structure": _activity_shape(data),
+        "safe_detail_structure": _activity_safe_nested(
+            payload, include_text=False
+        ),
+        "streams": stream_shapes,
+        "gps": {
+            "gps_stream_present": gps_count > 0,
+            "point_count": gps_count,
+            "coordinate_record_count": stream_shapes[
+                "longitude_latitude"
+            ]["sample_count"],
+            "coordinate_parse_complete": gps_parse_complete,
+            "coordinate_values_suppressed": True,
+            "timestamp_sample_count": time_encoded_count,
+            "timestamp_numeric_sample_count": len(time_values),
+            "timestamp_parse_complete": time_parse_complete,
+            "timestamp_offset_start": (
+                cumulative_time[0]
+                if cumulative_time and time_parse_complete
+                else None
+            ),
+            "timestamp_offset_end": (
+                cumulative_time[-1]
+                if cumulative_time and time_parse_complete
+                else None
+            ),
+            "timestamp_semantics": (
+                "delta offsets observed in public exporter; production "
+                "contract not yet verified"
+            ),
+        },
+        "altitude": {
+            "altitude_stream_present": bool(altitude_values),
+            "sample_count": altitude_encoded_count,
+            "numeric_sample_count": len(altitude_values),
+            "numeric_parse_complete": altitude_parse_complete,
+            "raw_minimum": (
+                min(altitude_values)
+                if altitude_values and altitude_parse_complete
+                else None
+            ),
+            "raw_maximum": (
+                max(altitude_values)
+                if altitude_values and altitude_parse_complete
+                else None
+            ),
+            "candidate_minimum_metres": (
+                min(altitude_values) / 100
+                if altitude_values and altitude_parse_complete
+                else None
+            ),
+            "candidate_maximum_metres": (
+                max(altitude_values) / 100
+                if altitude_values and altitude_parse_complete
+                else None
+            ),
+            "scaling_evidence": (
+                "/100 in observed public exporter; not production-proven here"
+            ),
+        },
+        "heart_rate": {
+            "stream_present": stream_shapes["heart_rate"]["present"],
+            **_detail_delta_pair_summary(payload.get("heart_rate")),
+        },
+        "workout_notes": {
+            "present": any(item["present"] for item in notes),
+            "matches": notes,
+            "text_values_suppressed": True,
+        },
+        "unknown_detail_field_names": sorted(
+            set(str(key) for key in payload)
+            - set(ACTIVITY_DETAIL_STREAM_FIELDS)
+            - {"trackid", "trackId", "source", "version", "provider"}
+        ),
+        "evidence_level": "OBSERVED_IN_PUBLIC_IMPLEMENTATION",
+    }
+
+
 def _activity_diagnostic_window(
     from_date: str, to_date: str, timezone_name: str
 ) -> tuple[int, int]:
@@ -1969,6 +2244,93 @@ def cmd_diagnose_activities(args: argparse.Namespace) -> None:
             "content is omitted unless --include-text is explicit."
         ),
         "sports": sports,
+    }
+    _emit_json(report, args)
+
+
+def cmd_diagnose_activity_detail(args: argparse.Namespace) -> None:
+    timezone_name = args.timezone or load_config().get("timezone") or FRESHNESS_TIMEZONE
+    try:
+        start_track_id, stop_track_id = _activity_diagnostic_window(
+            args.from_date, args.to_date, timezone_name
+        )
+    except (ValueError, KeyError) as exc:
+        sys.exit(f"Invalid activity detail date range/timezone: {exc}")
+
+    client = _load_client()
+    request_status = "ok"
+    diagnostic: dict[str, Any]
+    source_discovered = False
+    detail_request_attempted = False
+    try:
+        history = client.sport_history(
+            "run", start_track_id, stop_track_id, need_sub_data=1
+        )
+        summary_record = _activity_record_by_track_id(history, args.track_id)
+        if summary_record is None:
+            diagnostic = {
+                "history_record_found": False,
+                "detail_request_attempted": False,
+                "reason": "track_id_not_found_in_bounded_history_response",
+            }
+        else:
+            source = summary_record.get("source")
+            if not isinstance(source, str) or not source:
+                diagnostic = {
+                    "history_record_found": True,
+                    "detail_request_attempted": False,
+                    "reason": "history_record_has_no_usable_source_parameter",
+                    "sport_mapping": _activity_sport_mapping(summary_record),
+                }
+            else:
+                source_discovered = True
+                detail_request_attempted = True
+                detail = client.sport_detail(args.track_id, source)
+                diagnostic = {
+                    "history_record_found": True,
+                    "detail_request_attempted": True,
+                    **diagnose_activity_detail_payload(
+                        detail,
+                        expected_track_id=args.track_id,
+                        summary_record=summary_record,
+                    ),
+                }
+    except requests.RequestException as exc:
+        request_status = "error"
+        diagnostic = {
+            "error": type(exc).__name__,
+            "detail_request_contract_unverified_in_current_account": True,
+            "detail_request_attempted": detail_request_attempted,
+        }
+        if exc.response is not None:
+            diagnostic["http_status"] = exc.response.status_code
+
+    report = {
+        "endpoint_contract": {
+            "method": "GET",
+            "history_path": "/v1/sport/run/history.json",
+            "detail_path": "/v1/sport/run/detail.json",
+            "detail_query_parameters": ["trackid", "source", "r"],
+            "evidence_level": "OBSERVED_IN_PUBLIC_IMPLEMENTATION",
+            "production_verification_required": True,
+        },
+        "request": {
+            "from_date": args.from_date,
+            "to_date": args.to_date,
+            "timezone": timezone_name,
+            "track_id": str(args.track_id),
+            "history_startTrackId": start_track_id,
+            "history_stopTrackId": stop_track_id,
+            "source_parameter_discovered_from_history": (
+                source_discovered
+            ),
+        },
+        "privacy": (
+            "Coordinates, route values, private text, source values, credentials, "
+            "headers, cookies, user/device identifiers, and URLs are omitted."
+        ),
+        "request_status": request_status,
+        "detail": diagnostic,
     }
     _emit_json(report, args)
 
@@ -3991,6 +4353,26 @@ def main() -> None:
         help="Explicitly include title/description/note values; omitted by default",
     )
     sp.set_defaults(func=cmd_diagnose_activities)
+
+    sp = sub.add_parser(
+        "diagnose-activity-detail",
+        help=(
+            "Sanitized probe of the public-code-backed activity detail contract"
+        ),
+    )
+    _add_json(sp)
+    sp.add_argument("--from-date", required=True, help="First local date YYYY-MM-DD")
+    sp.add_argument("--to-date", required=True, help="Last local date YYYY-MM-DD")
+    sp.add_argument(
+        "--timezone",
+        help="IANA timezone for local bounds (default config or Europe/Ljubljana)",
+    )
+    sp.add_argument(
+        "--track-id",
+        required=True,
+        help="Exact activity trackid; source is discovered from bounded history",
+    )
+    sp.set_defaults(func=cmd_diagnose_activity_detail)
 
     sp = sub.add_parser(
         "diagnose-sport-coverage",

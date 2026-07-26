@@ -906,3 +906,29 @@ the reported cursor without assuming account-wide completeness.
 history response. `GPS_NOT_APPLICABLE` is expected for Pool Swim and
 Cross-training. Mode-5 population differences are observations from one
 representative per mode, not proof that Coach mode caused them.
+
+## Z001.9 activity detail probe
+
+Static history did not contain a detail endpoint, but public exporter code
+documents `GET /v1/sport/run/detail.json` with `trackid` and the matching
+summary's `source`. Use the CLI diagnostic rather than raw `curl`, because raw
+detail responses may contain complete routes and private text:
+
+```bash
+python3 zepp_health.py diagnose-activity-detail \
+  --from-date ACTIVITY_DATE --to-date ACTIVITY_DATE \
+  --timezone Europe/Ljubljana \
+  --track-id TRACKID --json
+```
+
+Interpret `evidence_level=OBSERVED_IN_PUBLIC_IMPLEMENTATION` literally.
+`request_status=ok` plus `recognized_wrapper=true` is still required before
+claiming current-account support. Stream `present` and `sample_count` describe
+the selected activity only. Candidate delta decoding and altitude `/100`
+scaling must be checked against its summary before promotion to production-
+proven semantics.
+
+If the request fails, stop. Do not enumerate endpoints. Perform a controlled
+official-app capture while opening the exact activity map/charts/laps/notes/
+Coach/export screens, and sanitize it as described in
+`docs/zepp_activity_detail.md`.

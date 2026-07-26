@@ -562,6 +562,13 @@ streams, or strength/body-region detail. Sensor status is activity-specific:
 an unavailable power field or zero cadence gives no positive sensor evidence,
 but does not prove the sport/API cannot support that sensor.
 
+Z001.9 adds a candidate native-track evidence source:
+`/v1/sport/run/detail.json`. Its compact strings must retain endpoint, field
+path, raw encoding, decoding method, and evidence grade. Public parser
+transformations such as delta accumulation and altitude `/100` scaling are not
+automatically production-proven. No detail-derived metric may overwrite a
+history summary until current production values and sport semantics agree.
+
 ### Safe deterministic sub-data comparison
 
 `diagnose-activities --compare-sub-data --track-id ...` performs exactly two

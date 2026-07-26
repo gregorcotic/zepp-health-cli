@@ -9,6 +9,7 @@ from zepp_health import (
     _activity_diagnostic_window,
     audit_activity_capabilities,
     compare_activity_sub_data_payloads,
+    diagnose_activity_detail_payload,
     diagnose_activity_payload,
     format_sport_coverage_mapping_list,
     inventory_activity_payload,
@@ -313,6 +314,119 @@ class ActivityDiagnosticTests(unittest.TestCase):
                 "type": "",
             },
         )
+
+    def test_sport_detail_uses_public_code_backed_contract(self) -> None:
+        client = ZeppClient("private-token", "private-user", "example.invalid")
+        with patch.object(client, "get_json", return_value={"data": {}}) as get_json:
+            client.sport_detail(123456, "run.watch.huami.com")
+        get_json.assert_called_once_with(
+            "/v1/sport/run/detail.json",
+            {
+                "trackid": 123456,
+                "source": "run.watch.huami.com",
+            },
+        )
+
+    def test_activity_detail_summarizes_streams_without_coordinates_or_notes(
+        self,
+    ) -> None:
+        payload = {
+            "code": 1,
+            "message": "success",
+            "data": {
+                "trackid": 123456,
+                "source": "run.watch.huami.com",
+                "longitude_latitude": (
+                    "4612345678,1423456789;100,-100;200,300;"
+                ),
+                "time": "0;5;5;",
+                "altitude": "90000;90500;91000;",
+                "heart_rate": "0,120;5,10;5,-5;",
+                "speed": "0,20;5,1;",
+                "cadence": "0,80;5,2;",
+                "power_meter": "0,210;5,5;",
+                "lap": "private-lap-encoding",
+                "notes": "Private Deadlift 5x5 note",
+                "nested": {"description": "Private nested description"},
+                "userId": "private-user",
+                "deviceId": "private-device",
+            },
+        }
+        report = diagnose_activity_detail_payload(
+            payload,
+            expected_track_id=123456,
+            summary_record={"type": 22, "sport_mode": 0},
+        )
+        self.assertTrue(report["recognized_wrapper"])
+        self.assertTrue(report["detail_track_id_matches"])
+        self.assertTrue(report["gps"]["gps_stream_present"])
+        self.assertEqual(report["gps"]["point_count"], 3)
+        self.assertEqual(report["gps"]["timestamp_offset_end"], 10)
+        self.assertEqual(report["altitude"]["sample_count"], 3)
+        self.assertEqual(report["altitude"]["candidate_minimum_metres"], 900)
+        self.assertEqual(report["altitude"]["candidate_maximum_metres"], 910)
+        self.assertEqual(report["heart_rate"]["decoded_sample_count"], 3)
+        self.assertEqual(report["heart_rate"]["minimum"], 120)
+        self.assertEqual(report["heart_rate"]["maximum"], 130)
+        self.assertTrue(report["workout_notes"]["present"])
+        self.assertEqual(
+            {item["path"] for item in report["workout_notes"]["matches"]},
+            {"$.notes", "$.nested.description"},
+        )
+        rendered = json.dumps(report)
+        self.assertNotIn("4612345678", rendered)
+        self.assertNotIn("1423456789", rendered)
+        self.assertNotIn("Deadlift", rendered)
+        self.assertNotIn("nested description", rendered)
+        self.assertNotIn("private-user", rendered)
+        self.assertNotIn("private-device", rendered)
+
+    def test_activity_detail_handles_empty_pool_and_unknown_wrapper(self) -> None:
+        pool = diagnose_activity_detail_payload(
+            {
+                "data": {
+                    "trackid": 42,
+                    "longitude_latitude": "",
+                    "lap": "",
+                    "stroke_speed": "",
+                }
+            },
+            expected_track_id=42,
+            summary_record={"type": 14, "sport_mode": 0},
+        )
+        self.assertFalse(pool["gps"]["gps_stream_present"])
+        self.assertEqual(pool["gps"]["point_count"], 0)
+        self.assertEqual(pool["sport_mapping"]["sport_name"], "Pool Swim")
+        unknown = diagnose_activity_detail_payload(
+            {"unexpected": [{"longitude_latitude": "private"}]},
+            expected_track_id=42,
+        )
+        self.assertFalse(unknown["recognized_wrapper"])
+        self.assertEqual(unknown["streams"], {})
+
+        malformed = diagnose_activity_detail_payload(
+            {
+                "data": {
+                    "trackid": 42,
+                    "longitude_latitude": "not-a-coordinate;",
+                    "time": "0;invalid;",
+                    "altitude": "90000;invalid;",
+                    "heart_rate": "0,120;broken;",
+                }
+            },
+            expected_track_id=42,
+        )
+        self.assertFalse(malformed["gps"]["gps_stream_present"])
+        self.assertEqual(malformed["gps"]["coordinate_record_count"], 1)
+        self.assertFalse(malformed["gps"]["coordinate_parse_complete"])
+        self.assertFalse(malformed["gps"]["timestamp_parse_complete"])
+        self.assertIsNone(malformed["gps"]["timestamp_offset_end"])
+        self.assertFalse(malformed["altitude"]["numeric_parse_complete"])
+        self.assertIsNone(malformed["altitude"]["raw_minimum"])
+        self.assertFalse(
+            malformed["heart_rate"]["decoded_using_public_exporter_delta_model"]
+        )
+        self.assertIsNone(malformed["heart_rate"]["minimum"])
 
     def test_sub_data_diff_is_structural_and_coordinate_safe(self) -> None:
         without_sub_data = {
