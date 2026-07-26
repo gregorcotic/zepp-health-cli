@@ -35,3 +35,8 @@ endpoint. `data.next` exists, but safe continuation semantics are unresolved.
 New mappings require a sanitized response plus a matching Zepp app workout.
 Never commit personal payloads, coordinates, device/user identifiers, or
 workout notes.
+
+The 2026 bounded inventory has 135 records in 14 `(type, sport_mode)` groups.
+Their unknown IDs are intentionally not cataloged as sports until app matching
+is returned. `diagnose-sport-coverage --mapping-list` supplies one safe
+representative end time and summary per group for that process.

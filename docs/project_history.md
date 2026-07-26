@@ -280,3 +280,15 @@ to contain every activity type. Ride/Gravel/MTB, Pool Swim, Open Water Swim,
 Run/Trail Run, Ski, Walk, and a distinct Strength type remain
 production-pending. C017 stays paused; no production, downstream, storage, or
 repository-structure changes were made.
+
+After the bounded 2026 production probe returned 135 records in 14
+`type`/`sport_mode` groups, the coverage diagnostic gained safe representative
+lookup metadata for manual app matching. It reports the raw representative
+`end_time`, its date and clock time in the requested timezone, normalized
+duration seconds, distance metres, calories, and the source field used for
+each normalized metric. It does not relabel `end_time` as a start timestamp.
+
+An opt-in `--mapping-list` renders one compact line per group without exposing
+titles, notes, coordinates, device/user identifiers, URLs, or credentials.
+Unknown types remain unknown until the operator matches the representative
+record in the Zepp app; no new sport mappings were inferred or hard-coded.

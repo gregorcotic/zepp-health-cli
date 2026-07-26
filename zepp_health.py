@@ -1021,8 +1021,79 @@ def _activity_response_next(data: Any) -> Any:
     return None
 
 
+def _activity_local_end_parts(
+    value: Any, timezone_name: str
+) -> tuple[str | None, str | None]:
+    """Resolve a plausible epoch end_time without relabeling it as a start."""
+    try:
+        epoch = float(value)
+    except (TypeError, ValueError):
+        return None, None
+    if epoch >= 1_000_000_000_000:
+        epoch /= 1000
+    try:
+        local = datetime.fromtimestamp(epoch, ZoneInfo(timezone_name))
+    except (OSError, OverflowError, ValueError, KeyError):
+        return None, None
+    if not 2000 <= local.year <= 2100:
+        return None, None
+    return local.date().isoformat(), local.strftime("%H:%M:%S")
+
+
+def _activity_representative_metrics(
+    record: dict[str, Any], timezone_name: str
+) -> dict[str, Any]:
+    end_time = record.get("end_time")
+    local_date, local_time = _activity_local_end_parts(end_time, timezone_name)
+
+    duration = None
+    duration_field = None
+    if isinstance(record.get("run_time"), (int, float)):
+        duration = record["run_time"]
+        duration_field = "run_time"
+    elif isinstance(record.get("totalTimeWithMillis"), (int, float)):
+        duration = record["totalTimeWithMillis"] / 1000
+        duration_field = "totalTimeWithMillis"
+    elif isinstance(record.get("exerciseTimeWithMillis"), (int, float)):
+        duration = record["exerciseTimeWithMillis"] / 1000
+        duration_field = "exerciseTimeWithMillis"
+
+    distance = None
+    distance_field = None
+    for field in ("highPrecisionDistance", "dis"):
+        if isinstance(record.get(field), (int, float)):
+            distance = record[field]
+            distance_field = field
+            break
+
+    calories = (
+        record.get("calorie")
+        if isinstance(record.get("calorie"), (int, float))
+        else None
+    )
+    return {
+        "representative_end_time": end_time,
+        "representative_local_date": local_date,
+        "representative_local_time": local_time,
+        "representative_duration": duration,
+        "representative_duration_unit": "seconds" if duration is not None else None,
+        "representative_duration_source_field": duration_field,
+        "representative_distance": distance,
+        "representative_distance_unit": "metres" if distance is not None else None,
+        "representative_distance_source_field": distance_field,
+        "representative_calories": calories,
+        "representative_calories_unit": "kcal" if calories is not None else None,
+        "representative_calories_source_field": (
+            "calorie" if calories is not None else None
+        ),
+    }
+
+
 def inventory_activity_payload(
-    data: Any, *, sport_segment: str = "run"
+    data: Any,
+    *,
+    sport_segment: str = "run",
+    timezone_name: str = FRESHNESS_TIMEZONE,
 ) -> dict[str, Any]:
     """Group one bounded history response without claiming complete pagination."""
     records = _activity_records(data)
@@ -1053,6 +1124,7 @@ def inventory_activity_payload(
             "sport_mode": representative.get("sport_mode"),
             "record_count": len(members),
             "representative_trackid": representative.get("trackid"),
+            **_activity_representative_metrics(representative, timezone_name),
             "known_mapping": ACTIVITY_FIXTURE_MAPPINGS.get(numeric_type),
             "field_status_counts": statuses,
             "location_metadata_present_count": sum(
@@ -1096,6 +1168,42 @@ def inventory_activity_payload(
         },
         "type_groups": type_groups,
     }
+
+
+def format_sport_coverage_mapping_list(inventory: dict[str, Any]) -> str:
+    lines: list[str] = []
+    for group in inventory.get("type_groups", []):
+        duration = group.get("representative_duration")
+        if isinstance(duration, (int, float)):
+            total_seconds = int(round(duration))
+            duration_text = (
+                f"{total_seconds // 3600:02d}:"
+                f"{(total_seconds % 3600) // 60:02d}:"
+                f"{total_seconds % 60:02d}"
+            )
+        else:
+            duration_text = "unknown"
+        distance = group.get("representative_distance")
+        distance_text = (
+            f"{distance / 1000:.2f} km"
+            if isinstance(distance, (int, float))
+            else "unknown"
+        )
+        calories = group.get("representative_calories")
+        calories_text = (
+            f"{calories:g} kcal"
+            if isinstance(calories, (int, float))
+            else "unknown"
+        )
+        local_date = group.get("representative_local_date") or "unknown-date"
+        local_time = group.get("representative_local_time") or "unknown-time"
+        lines.append(
+            f"type={group.get('type')} sport_mode={group.get('sport_mode')} | "
+            f"end={local_date} {local_time} | duration={duration_text} | "
+            f"distance={distance_text} | calories={calories_text} | "
+            f"trackid={group.get('representative_trackid')}"
+        )
+    return "\n".join(lines)
 
 
 def _activity_record_by_track_id(
@@ -1336,6 +1444,8 @@ def cmd_diagnose_activities(args: argparse.Namespace) -> None:
 
 
 def cmd_diagnose_sport_coverage(args: argparse.Namespace) -> None:
+    if args.mapping_list and args.json:
+        sys.exit("--mapping-list cannot be combined with --json")
     timezone_name = args.timezone or load_config().get("timezone") or FRESHNESS_TIMEZONE
     try:
         start_track_id, stop_track_id = _activity_diagnostic_window(
@@ -1348,7 +1458,9 @@ def cmd_diagnose_sport_coverage(args: argparse.Namespace) -> None:
         payload = client.sport_history(
             "run", start_track_id, stop_track_id, need_sub_data=args.need_sub_data
         )
-        inventory = inventory_activity_payload(payload, sport_segment="run")
+        inventory = inventory_activity_payload(
+            payload, sport_segment="run", timezone_name=timezone_name
+        )
         request_status = "ok"
     except requests.RequestException as exc:
         inventory = {
@@ -1387,7 +1499,13 @@ def cmd_diagnose_sport_coverage(args: argparse.Namespace) -> None:
         "request_status": request_status,
         "inventory": inventory,
     }
-    _emit_json(report, args)
+    if args.mapping_list:
+        if request_status != "ok":
+            print(f"sport coverage request failed: {inventory.get('error', 'unknown')}")
+        else:
+            print(format_sport_coverage_mapping_list(inventory))
+    else:
+        _emit_json(report, args)
 
 
 def cmd_band_data(args: argparse.Namespace) -> None:
@@ -3309,6 +3427,14 @@ def main() -> None:
         choices=(0, 1),
         default=1,
         help="Request Zepp sub-data (default 1)",
+    )
+    sp.add_argument(
+        "--mapping-list",
+        action="store_true",
+        help=(
+            "Print one privacy-safe representative line per type/sport_mode "
+            "instead of JSON"
+        ),
     )
     sp.set_defaults(func=cmd_diagnose_sport_coverage)
 

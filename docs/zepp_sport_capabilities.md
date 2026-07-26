@@ -58,3 +58,8 @@ historical cross-checks, and secondary distance/elevation comparison. These
 are optional-enrichment candidates, not automatic ground truth. Production
 breadth must be proven for the remaining sports before Zepp can be declared
 primary across roughly 95% of the user's activities.
+
+The first current-year inventory returned 14 type/mode groups. Capability
+classification remains unchanged until the representative rows are manually
+matched to their Zepp app sport labels; field patterns alone are not mapping
+evidence.

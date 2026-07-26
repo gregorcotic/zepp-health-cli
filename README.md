@@ -96,6 +96,11 @@ python3 zepp_health.py diagnose-sport-coverage \
   --from-date 2026-04-28 --to-date 2026-07-26 \
   --timezone Europe/Ljubljana --need-sub-data 1 --json
 
+# One representative line per type/sport_mode for manual Zepp-app mapping
+python3 zepp_health.py diagnose-sport-coverage \
+  --from-date 2026-01-01 --to-date 2026-07-26 \
+  --timezone Europe/Ljubljana --need-sub-data 1 --mapping-list
+
 # Sleep / steps / band payload (large JSON; often base64-encoded blobs)
 python3 zepp_health.py band-data --days 14
 python3 zepp_health.py band-data --from-date 2026-04-01 --to-date 2026-04-18

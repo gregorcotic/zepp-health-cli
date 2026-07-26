@@ -740,6 +740,28 @@ The current mappings are deliberately narrow: type 22 is proven for the
 Ojstrica Hike fixture and type 130 for the July 22 Cross-training fixture. See
 `docs/zepp_sport_types.md` and `docs/zepp_sport_capabilities.md`.
 
+For manual mapping against the Zepp app, use:
+
+```bash
+python3 zepp_health.py diagnose-sport-coverage \
+  --from-date 2026-01-01 \
+  --to-date 2026-07-26 \
+  --timezone Europe/Ljubljana \
+  --need-sub-data 1 \
+  --mapping-list
+```
+
+Each line identifies one representative using `end_time`, because production
+history does not populate `start_time`. The output calls it `end`; it must not
+be interpreted as the workout's start. JSON adds
+`representative_end_time`, `representative_local_date`,
+`representative_local_time`, duration/distance/calorie values, units, and
+source-field names to every existing group without removing prior keys.
+
+Use the displayed local end date/time, duration, distance, calories, and
+track ID to locate the exact app activity. Record the app's sport label
+separately; never infer it solely from the metric pattern.
+
 ### Staged production probes (read-only)
 
 Run phase A first. Phase B is useful only if a required sport is absent and

@@ -1,6 +1,6 @@
 import json
 import unittest
-from datetime import datetime
+from datetime import datetime, timezone
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
@@ -9,6 +9,7 @@ from zepp_health import (
     _activity_diagnostic_window,
     compare_activity_sub_data_payloads,
     diagnose_activity_payload,
+    format_sport_coverage_mapping_list,
     inventory_activity_payload,
 )
 
@@ -443,6 +444,72 @@ class ActivityDiagnosticTests(unittest.TestCase):
         self.assertNotIn("Private pool session", rendered)
         self.assertNotIn("46.1", rendered)
         self.assertNotIn("14.3", rendered)
+
+    def test_coverage_representative_uses_end_time_in_requested_timezone(self) -> None:
+        end_time = int(
+            datetime(2026, 7, 25, 18, 30, tzinfo=timezone.utc).timestamp()
+        )
+        payload = {
+            "data": {
+                "next": -1,
+                "summary": [{
+                    "trackid": 1784948221,
+                    "type": 22,
+                    "sport_mode": 0,
+                    "end_time": end_time,
+                    "totalTimeWithMillis": 3_697_607,
+                    "highPrecisionDistance": 14_207.45,
+                    "calorie": 6567,
+                    "sport_title": "Private hike title",
+                    "deviceid": "private-device",
+                }],
+            }
+        }
+        group = inventory_activity_payload(
+            payload, timezone_name="Europe/Ljubljana"
+        )["type_groups"][0]
+        self.assertEqual(group["representative_end_time"], end_time)
+        self.assertEqual(group["representative_local_date"], "2026-07-25")
+        self.assertEqual(group["representative_local_time"], "20:30:00")
+        self.assertEqual(group["representative_duration"], 3697.607)
+        self.assertEqual(
+            group["representative_duration_source_field"], "totalTimeWithMillis"
+        )
+        self.assertEqual(group["representative_distance"], 14_207.45)
+        self.assertEqual(
+            group["representative_distance_source_field"], "highPrecisionDistance"
+        )
+        self.assertEqual(group["representative_calories"], 6567)
+        rendered = json.dumps(group)
+        self.assertNotIn("Private hike title", rendered)
+        self.assertNotIn("private-device", rendered)
+
+    def test_coverage_mapping_list_is_human_readable_and_text_safe(self) -> None:
+        payload = {
+            "data": {
+                "next": -1,
+                "summary": [{
+                    "trackid": 42,
+                    "type": 14,
+                    "sport_mode": 0,
+                    "end_time": 1785002400,
+                    "run_time": 3723,
+                    "dis": 12345,
+                    "calorie": 500,
+                    "sport_title": "Private activity",
+                }],
+            }
+        }
+        inventory = inventory_activity_payload(
+            payload, timezone_name="Europe/Ljubljana"
+        )
+        output = format_sport_coverage_mapping_list(inventory)
+        self.assertIn("type=14 sport_mode=0", output)
+        self.assertIn("duration=01:02:03", output)
+        self.assertIn("distance=12.35 km", output)
+        self.assertIn("calories=500 kcal", output)
+        self.assertIn("trackid=42", output)
+        self.assertNotIn("Private activity", output)
 
 
 if __name__ == "__main__":
