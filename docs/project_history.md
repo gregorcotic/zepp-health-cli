@@ -53,7 +53,8 @@ Ownership: this app owns Zepp synchronization and database coverage facts.
 `coach-data-bridge` must project the freshness object into its generated
 `general-context.json`; bridge logic is intentionally not placed here. Deploy
 and observe standalone first, then mirror into `coach-platform`, run its
-`test-all`, and resume C017.3. C018 remains deferred.
+`test-all`, and resume C017.3. At the C019 close, C018 remained deferred; it is
+completed in the entries below.
 
 ## C018.1 — Wake Energy forensics
 
@@ -103,3 +104,26 @@ The three affected derived `wake_energy` rows require a guarded in-place
 record-key/date repair before resynchronization. Their sanitized raw payloads
 and sync history remain intact; no schema migration or historical rebuild is
 required.
+
+## C018.3 — Production validation and closeout
+
+The guarded repair and targeted seven-day resynchronization completed
+successfully in production. The resync retrieved six wake records and reported
+all six unchanged, confirming stable corrected logical identities with no
+duplicates or revision regression. The repaired range retained Wake Charge
+values 72, 65, 41, and 65 on July 23–26 respectively. July 24–26 raw parent
+dates remained one day earlier while the wake-specific resolver and SQLite rows
+used the correct local wake dates.
+
+`sync-health` was healthy: synchronization occurred today, Wake Energy covered
+July 26 as today, HRV/readiness/sleep-related readiness also covered today, and
+`morning_data_status` became `complete` without weakening freshness rules.
+SQLite integrity and foreign-key checks passed under schema version 3; raw
+payloads, timestamps, sync history, and all other Zepp domain counts remained
+intact.
+
+C018 is complete. C018.2 changed only the value of the existing
+`wake_energy.event_date` contract, so no new bridge field, gateway route, GPT
+Action, OpenAPI schema, token, URL, or Custom GPT import is required. Existing
+C017 monorepo mirroring remains separate planned work and may resume after this
+standalone closeout.

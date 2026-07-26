@@ -62,6 +62,12 @@ health calculations.
 
 ## Wake BioCharge forensic procedure
 
+Status: closed in C018.3. The production symptom was a current Wake BioCharge
+visible in Zepp while SQLite and factual freshness remained on the prior day.
+Production proved that the parent UTC timestamp was an envelope date, while
+`value.startTime + sample.s` with the observed prefixed timezone identified the
+local wake day.
+
 The current path is:
 
 `GET /v2/users/me/events` with `eventType=Charge`,
@@ -151,7 +157,7 @@ the wake clock and could not parse Zepp's prefixed timezone. After the fix the
 same raw record normalizes to July 26. The value remains Wake BioCharge at
 waking; current/intraday BioCharge is not substituted.
 
-### Targeted production repair after deployment
+### Completed targeted production repair
 
 Stop the timer so corrected rows cannot be inserted before the key move. Back
 up first, verify the three exact source rows, then move their derived identities
@@ -211,6 +217,11 @@ stop and restore nothing; investigate before opening a write transaction. The
 `.bail on` plus the temporary `CHECK(n=1)` guard aborts the sqlite3 process if
 an UPDATE does not affect exactly one row, leaving the transaction uncommitted.
 Do not run this repair on another database or capture.
+
+The production repair completed successfully. A subsequent seven-day sync
+retrieved six wake rows and reported `inserted=0`, `updated=0`, and
+`unchanged=6`; this is the expected idempotent result and confirms that no
+duplicate corrected identities were introduced.
 
 Validate afterward:
 
@@ -324,4 +335,39 @@ Interpretation:
 - raw current-day wake fields but zero/missing normalized rows → Case D;
 - normalized today but missing/wrong SQLite row → Case E;
 - proven different publication/semantic date → Case F;
-- otherwise Case G. Local characterization alone is currently Case G.
+- otherwise Case G.
+
+### C018.3 production closeout
+
+The repaired production rows are:
+
+- July 23: `wakeCharge=72`;
+- July 24: `wakeCharge=65`;
+- July 25: `wakeCharge=41`;
+- July 26: `wakeCharge=65`.
+
+For July 24–26, the generic parent date remained the preceding day while both
+the wake resolver and stored `event_date` used the correct local day. Source
+values and timestamps remained intact. `db-check` returned
+`integrity_check=ok`, no foreign-key errors, WAL journal mode, and schema
+version 3. Raw payload and sync-history tables remained present and valid.
+
+`sync-health` reported a successful synchronization today,
+`wake_energy.latest_date=2026-07-26`, Wake Energy coverage `today`, all other
+morning domains at today, and `morning_data_status=complete`. This follows from
+correct data dates; the morning rule was not relaxed. If the API later lacks a
+current-day wake record, Wake Energy may still be partial after a successful
+sync.
+
+The context-generation service was refreshed after repair. C018.2 did not add
+or rename any factual field: consumers still read
+`domain_data_freshness.wake_energy.latest_date` and
+`morning_data_status`. Therefore C018 requires no coach-data-bridge,
+coach-context-gateway, GPT Action, OpenAPI, token, URL, or schema-import change.
+Existing C017 monorepo migration work remains the place to mirror the standalone
+application and its already-defined factual contract.
+
+Keep the pre-C018.2 backup until the normal retention period expires. If a
+post-repair integrity or value check ever fails, stop synchronization and use
+the documented `db-restore` workflow to a separate path first; do not overwrite
+the production database without a separately reviewed recovery action.
