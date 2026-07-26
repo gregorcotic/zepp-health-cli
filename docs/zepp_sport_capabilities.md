@@ -126,13 +126,38 @@ and cross-source validation without becoming a normal-operation dependency.
 
 ## Z001.9 detail-contract discovery
 
-Public exporter code establishes a credible
+Public exporter code first established a credible
 `GET /v1/sport/run/detail.json` contract using the history summary's
 `trackid` and `source`. Its modeled fields cover compact route, altitude, HR,
 speed, pace, cadence, lap, stroke, coaching, and power containers. This
-upgrades detail availability from unsupported guess to
-`OBSERVED_IN_PUBLIC_IMPLEMENTATION`; per-sport/current-account population
-remains `UNKNOWN` until the sanitized production probes run.
+upgraded detail availability from unsupported guess to
+`OBSERVED_IN_PUBLIC_IMPLEMENTATION`; the subsequent sanitized Z001.9 probes
+made the endpoint `PRODUCTION_PROVEN` for the current account. Population and
+semantics still vary by sport and field.
 
 History summary sufficiency is unchanged. A failed or empty detail probe would
 limit advanced analysis, not basic coach ingestion.
+
+## Z001.10 canonical detail observations
+
+Production probes now prove native detail population:
+
+| Sport | GPS | Altitude | HR | Other detail |
+|---|---:|---:|---:|---|
+| Hiking | 36,494 | 36,494 | 36,850 | speed, pace, gait, course, pause |
+| Cross-training | N/A | N/A | 2,596 | private `memo` Workout Notes |
+| Pool Swim | N/A | N/A | 1,518 | 62 lap records, pool pace/stroke/distance |
+| Open Water Swim | 1,633 | sentinel only | 1,607 | speed, pace, stroke speed |
+| Gravel Cycling | 6,420 | 6,420 | 7,039 | 7,073 cadence records; no power sensor |
+| Ski | 12,114 | 12,114 | 14,505 | speed and pace |
+
+These are activity observations, not universal rates or fixed stream
+alignment. Gravel power is supported as an optional sensor but was not
+recorded; that is not an API or activity-quality failure. Open Water altitude
+`-2000000` is sentinel-unavailable. Ski vertical descent semantics remain
+unchanged.
+
+Z001.11 persists these capabilities and observations separately. Optional
+cycling power absence remains `SUPPORTED_BUT_NOT_RECORDED`; Pool Swim and
+Cross-training GPS remain `NOT_APPLICABLE`; Open Water sentinel altitude has
+no valid normalized samples; Ski descent remains its own stored metric.

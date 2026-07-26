@@ -932,3 +932,51 @@ If the request fails, stop. Do not enumerate endpoints. Perform a controlled
 official-app capture while opening the exact activity map/charts/laps/notes/
 Coach/export screens, and sanitize it as described in
 `docs/zepp_activity_detail.md`.
+
+## Z001.10 canonical activity verification
+
+Use the same exact one-day/track-ID bounds as the detail probe:
+
+```bash
+python3 zepp_health.py diagnose-canonical-activity \
+  --from-date ACTIVITY_DATE --to-date ACTIVITY_DATE \
+  --timezone Europe/Ljubljana \
+  --track-id TRACKID --json
+```
+
+The output intentionally contains no coordinate/sample values, history
+`source`, or Workout Notes text. Check:
+
+- `quality.history_detail_identity_match=true`;
+- stream status/counts rather than assuming equal arrays or 1 Hz;
+- `SENTINEL_UNAVAILABLE` for Open Water Swim altitude `-2000000`;
+- `SUPPORTED_BUT_NOT_RECORDED` for optional cycling power with no meter;
+- `NOT_APPLICABLE` for Pool Swim/Cross-training GPS;
+- Ski vertical descent remains separate from elevation gain.
+
+If `HISTORY_DETAIL_TRACK_ID_MISMATCH` appears, no detail enrichment is merged.
+Do not bypass that guard.
+
+## Z001.11 stored activity checks
+
+```bash
+python3 zepp_health.py activity-status \
+  --db data/zepp_health.db --json
+
+python3 zepp_health.py inspect-activity \
+  --track-id TRACKID --db data/zepp_health.db --json
+
+python3 zepp_health.py db-check \
+  --db data/zepp_health.db --json
+```
+
+`activity-status` freshness is independent from health `sync-health`. A
+terminal history response with zero new records is `ok`. A detail failure,
+nonterminal `data.next`, or `--max-activities` truncation is `partial`; valid
+previous activities remain untouched and retryable.
+
+Use `sync-activities --refresh-details` over a narrow date range when an
+operator knows Notes/RPE/detail changed without a history fingerprint change.
+Normal inspection suppresses Notes and all GPS/sample values. The complete
+backup, migration, verification, and rollback procedure is in
+`docs/activity_storage.md`.

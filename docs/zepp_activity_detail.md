@@ -26,8 +26,10 @@ cadence points. An independent
 [Amazfit cloud backup walkthrough](https://christianott.ch/post/2022-10-26_amazfit_cloud/)
 reports the same endpoint and parameters.
 
-Evidence level is therefore `OBSERVED_IN_PUBLIC_IMPLEMENTATION`, not yet
-`PROVEN_IN_CURRENT_ACCOUNT`.
+This was initially classified `OBSERVED_IN_PUBLIC_IMPLEMENTATION`. Z001.9
+operator probes subsequently proved the same contract in the current
+production account, so the endpoint is now `PRODUCTION_PROVEN`. Per-field and
+per-sport population remain independently evidence-graded.
 
 ## Observed response contract
 
@@ -119,11 +121,11 @@ cookies, URLs, and user/device identifiers are suppressed.
 | Data class | History summary | Detail contract | Raw sample stream |
 |---|---|---|---|
 | identity/sport/duration/distance | production-proven | track ID returned | N/A |
-| GPS | location metadata only | `longitude_latitude` observed publicly | production probe pending |
-| altitude | summary fields | `altitude`, `air_pressure_altitude`, `correct_altitude` | production probe pending |
-| HR | summary min/avg/max | `heart_rate` | production probe pending |
-| speed/pace | summary varies | `speed`, `pace`, kilometre/mile pace | production probe pending |
-| cadence/power | summary sensor-dependent | `gait`, `cadence`, `power_meter` | production probe pending |
+| GPS | location metadata only | `longitude_latitude` | production-proven for tested outdoor fixtures |
+| altitude | summary fields | `altitude`, `air_pressure_altitude`, `correct_altitude` | production-proven for Hiking, Gravel, and Ski; sentinel for Open Water |
+| HR | summary min/avg/max | `heart_rate` | production-proven for all six tested fixtures |
+| speed/pace | summary varies | `speed`, `pace`, kilometre/mile pace | present in tested outdoor fixtures; units remain unresolved |
+| cadence/power | summary sensor-dependent | `gait`, `cadence`, `power_meter` | Gravel cadence present; power not recorded without a meter |
 | laps/intervals | limited summary | `lap`, `coaching_segment` | semantics pending |
 | swim detail | pool/stroke summaries | `stroke_speed`, `lap` candidates | semantics pending |
 | strength detail | summary containers mostly empty | no proven exercise/muscle field | not discovered |
@@ -177,3 +179,23 @@ current Zepp app/account, do not guess another URL. Capture official-app
 traffic while opening the activity map, charts, laps/sets, notes, Coach stages,
 and export screen. Retain only path, method, query-key names, response field
 names/counts, selected track-ID match, and sanitized error/status evidence.
+
+## Production verification and canonical use
+
+Z001.9 production probes confirmed the endpoint and populated native GPS,
+altitude, HR, cadence, lap/swim, and Workout Notes structures across the
+representative sports. Counts and sport-specific observations are recorded in
+`docs/zepp_sport_capabilities.md`.
+
+`canonicalize_activity()` now performs the first deterministic merge. It keeps
+history as summary authority, decodes only evidence-backed streams, preserves
+unresolved structures, and never aligns independent stream arrays by index.
+The normal diagnostic surface is `safe_canonical_activity()`, which excludes
+coordinates, note content, source identifiers, and raw sample values. See
+`docs/canonical_activity_model.md`.
+
+Z001.11 stores the canonical result atomically. Detail is fetched only for
+new/changed/incomplete records unless `--refresh-details` is explicitly used.
+A changed detail stream replaces all dependent samples in one transaction;
+failed detail never mixes with the prior complete activity. See
+`docs/activity_storage.md`.

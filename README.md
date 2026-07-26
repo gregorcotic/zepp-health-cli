@@ -111,6 +111,18 @@ python3 zepp_health.py diagnose-activity-detail \
   --from-date 2026-07-25 --to-date 2026-07-25 \
   --timezone Europe/Ljubljana --track-id TRACKID --json
 
+# Merge one history/detail activity into the privacy-safe canonical model
+python3 zepp_health.py diagnose-canonical-activity \
+  --from-date 2026-07-25 --to-date 2026-07-25 \
+  --timezone Europe/Ljubljana --track-id TRACKID --json
+
+# Persist a bounded native activity window and inspect it safely
+python3 zepp_health.py sync-activities \
+  --days 7 --db data/zepp_health.db --json
+python3 zepp_health.py activity-status --db data/zepp_health.db --json
+python3 zepp_health.py inspect-activity \
+  --track-id TRACKID --db data/zepp_health.db --json
+
 # Sleep / steps / band payload (large JSON; often base64-encoded blobs)
 python3 zepp_health.py band-data --days 14
 python3 zepp_health.py band-data --from-date 2026-04-01 --to-date 2026-04-18
@@ -229,7 +241,11 @@ All data requests are **GET**s to your regional `host`, with header `apptoken: <
 | `diagnose-activities` | Same sport-specific endpoint, with sanitized field/shape reporting for a narrow local-date window |
 | `diagnose-sport-coverage` | One-page bounded `/run/history` inventory grouped by `type` and `sport_mode`; unresolved pagination is explicit |
 | `diagnose-sport-capabilities` | One bounded `/run/history` request audited against the 14 approved representative IDs; coordinates and activity text are omitted |
-| `diagnose-activity-detail` | Bounded history lookup followed by sanitized `GET /v1/sport/run/detail.json?trackid=…&source=…`; public-code evidence, current-account verification pending |
+| `diagnose-activity-detail` | Bounded history lookup followed by sanitized, production-proven `GET /v1/sport/run/detail.json?trackid=…&source=…` |
+| `diagnose-canonical-activity` | Deterministic history/detail merge with sport-aware statuses, provenance, stream counts, quality flags, and coordinate/note suppression |
+| `sync-activities` | Bounded incremental native history/detail synchronization into relational SQLite activity tables |
+| `activity-status` | Privacy-safe activity counts, coverage, date range, sport groups, quality flags, and independent sync freshness |
+| `inspect-activity` | Safe stored summary/stream/lap/note metadata for one track ID; Notes text requires explicit `--include-notes` |
 | `band-data` | `GET /v1/data/band_data.json` (sleep/steps sync payload; often large) |
 | `manual-data` | `GET /v1/user/manualData.json` |
 | `user-info` | `GET /huami.health.getUserInfo.json` |

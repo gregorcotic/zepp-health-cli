@@ -24,6 +24,8 @@ python3 zepp_health.py sync-db --days 30
 python3 zepp_health.py sync-db --days 30 --db /opt/zepp-health-cli/data/zepp_health.db --json
 python3 zepp_health.py db-status
 python3 zepp_health.py daily-status --days 14 --from-db
+python3 zepp_health.py sync-activities --days 7 --db data/zepp_health.db
+python3 zepp_health.py activity-status --db data/zepp_health.db
 ```
 
 `sync-db` initializes the database, fetches each native domain independently,
@@ -43,6 +45,15 @@ normalized records and raw payload insertion use a SQLite transaction.
 - `insight_records`: normalized `Charge/insight_data` samples and unknown codes.
 - `raw_payloads`: deduplicated sanitized JSON responses for future reverse engineering.
 - `sync_runs` and `sync_run_domains`: synchronization provenance and outcomes.
+- `activities` and `activity_summary_metrics`: canonical native activity
+  identity/time and factual metric envelopes.
+- `activity_streams` and `activity_samples`: independently sampled native GPS,
+  altitude, HR, cadence, and unresolved structural streams.
+- `activity_laps`, `activity_notes`, `activity_quality_flags`, and
+  `activity_provenance`: ordered sport detail, private Notes, factual flags,
+  and audit evidence.
+- `activity_sync_runs`: activity-only attempted/successful freshness and
+  bounded synchronization results.
 
 Normalized tables use deterministic `record_key` values and UPSERT behavior.
 Repeating a sync does not create duplicate logical records. Raw payloads are
@@ -63,7 +74,7 @@ sidecar files.
 
 ## Migrations and deployment
 
-The database initializes with schema version 3. Future compatible schema
+The database initializes with schema version 4. Future compatible schema
 changes must increment the migration version and apply transactional migrations
 before normal reads/writes. The database is runtime state, not source code:
 
@@ -75,6 +86,11 @@ python3 zepp_health.py db-status --db /opt/zepp-health-cli/data/zepp_health.db
 ```
 
 `git pull` does not overwrite ignored local database files.
+
+Activity tables are an additive v3-to-v4 migration. They share backup and
+integrity tooling with health data, but activity freshness is reported by
+`activity-status`, not health `sync-health`. See
+[docs/activity_storage.md](activity_storage.md).
 
 For unattended Ubuntu synchronization, see [docs/operations.md](operations.md).
 The `sync-health` command reports database integrity, synchronization age,

@@ -18,11 +18,15 @@ from typing import Any, Iterator
 from zoneinfo import ZoneInfo
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 DEFAULT_DB_PATH = Path("data") / "zepp_health.db"
 _REMOVED_KEYS = {
     "app_token", "apptoken", "authorization", "cookie", "cookies",
     "user_id", "userid", "uid", "token", "access_token", "refresh_token",
+    "device_id", "deviceid", "device_sn", "devicesn", "account_id",
+    "accountid", "owner_id", "ownerid", "download_url", "downloadurl",
+    "file_url", "fileurl", "url", "secret_url", "secreturl",
+    "accesstoken", "refreshtoken", "authorizationheader",
 }
 FRESHNESS_TIMEZONE = "Europe/Ljubljana"
 MORNING_EXPECTED_AFTER = time(6, 30)
@@ -72,6 +76,37 @@ def db_value(value: Any) -> Any:
 def logical_key(*values: Any) -> str:
     raw = "\x1f".join("" if value is None else str(value) for value in values)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def payload_fingerprint(value: Any) -> str:
+    return hashlib.sha256(json_text(value).encode("utf-8")).hexdigest()
+
+
+def _number_or_none(value: Any) -> int | float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, str):
+        try:
+            number = float(value)
+        except ValueError:
+            return None
+        return int(number) if number.is_integer() else number
+    return None
+
+
+def _safe_activity_sync_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    allowed = (
+        "id", "started_at", "finished_at", "requested_from_date",
+        "requested_to_date", "timezone", "status", "activities_seen",
+        "inserted_count", "updated_count", "unchanged_count",
+        "detail_fetch_success", "detail_fetch_failed", "history_next",
+        "error_category", "error_type",
+    )
+    return {key: row[key] for key in allowed}
 
 
 def resolve_db_path(cli_path: str | Path | None = None, config: dict[str, Any] | None = None) -> Path:
@@ -305,6 +340,143 @@ CREATE TABLE IF NOT EXISTS historical_sync_progress (
 );
 """
 
+SCHEMA_V4_SQL = """
+CREATE TABLE IF NOT EXISTS activities (
+    track_id TEXT PRIMARY KEY,
+    source TEXT,
+    native_type INTEGER,
+    sport_mode INTEGER,
+    sport_name TEXT,
+    sport_family TEXT,
+    zepp_coach_mode INTEGER,
+    mapping_confidence TEXT,
+    local_activity_date TEXT,
+    start_time TEXT,
+    end_time TEXT,
+    timezone TEXT,
+    duration_s REAL,
+    history_fingerprint TEXT NOT NULL,
+    detail_fingerprint TEXT,
+    canonical_fingerprint TEXT NOT NULL,
+    history_payload_hash TEXT REFERENCES raw_payloads(payload_hash),
+    detail_payload_hash TEXT REFERENCES raw_payloads(payload_hash),
+    detail_complete INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    last_synced_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS activity_summary_metrics (
+    activity_track_id TEXT NOT NULL REFERENCES activities(track_id) ON DELETE CASCADE,
+    metric_name TEXT NOT NULL,
+    value_real REAL,
+    value_text TEXT,
+    unit TEXT,
+    status TEXT NOT NULL,
+    raw_value_json TEXT,
+    source_path TEXT,
+    semantic_confidence TEXT,
+    provenance_json TEXT,
+    reason TEXT,
+    PRIMARY KEY (activity_track_id, metric_name)
+);
+
+CREATE TABLE IF NOT EXISTS activity_streams (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    activity_track_id TEXT NOT NULL REFERENCES activities(track_id) ON DELETE CASCADE,
+    stream_type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    sample_count INTEGER NOT NULL DEFAULT 0,
+    unit TEXT,
+    source_path TEXT,
+    semantic_confidence TEXT,
+    provenance_json TEXT,
+    metadata_json TEXT,
+    UNIQUE (activity_track_id, stream_type)
+);
+
+CREATE TABLE IF NOT EXISTS activity_samples (
+    stream_id INTEGER NOT NULL REFERENCES activity_streams(id) ON DELETE CASCADE,
+    sample_index INTEGER NOT NULL,
+    offset_s REAL,
+    timestamp TEXT,
+    value_real REAL,
+    value_text TEXT,
+    latitude REAL,
+    longitude REAL,
+    status TEXT,
+    raw_value_json TEXT,
+    PRIMARY KEY (stream_id, sample_index)
+);
+
+CREATE TABLE IF NOT EXISTS activity_laps (
+    activity_track_id TEXT NOT NULL REFERENCES activities(track_id) ON DELETE CASCADE,
+    lap_type TEXT NOT NULL,
+    record_index INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    raw_components_json TEXT,
+    source_path TEXT,
+    provenance_json TEXT,
+    PRIMARY KEY (activity_track_id, lap_type, record_index)
+);
+
+CREATE TABLE IF NOT EXISTS activity_notes (
+    activity_track_id TEXT PRIMARY KEY REFERENCES activities(track_id) ON DELETE CASCADE,
+    present INTEGER NOT NULL,
+    note_text TEXT,
+    note_length INTEGER NOT NULL,
+    source_path TEXT,
+    evidence TEXT,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS activity_quality_flags (
+    activity_track_id TEXT NOT NULL REFERENCES activities(track_id) ON DELETE CASCADE,
+    flag TEXT NOT NULL,
+    PRIMARY KEY (activity_track_id, flag)
+);
+
+CREATE TABLE IF NOT EXISTS activity_provenance (
+    activity_track_id TEXT NOT NULL REFERENCES activities(track_id) ON DELETE CASCADE,
+    provenance_key TEXT NOT NULL,
+    provenance_json TEXT NOT NULL,
+    PRIMARY KEY (activity_track_id, provenance_key)
+);
+
+CREATE TABLE IF NOT EXISTS activity_sync_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    requested_from_date TEXT NOT NULL,
+    requested_to_date TEXT NOT NULL,
+    timezone TEXT NOT NULL,
+    status TEXT NOT NULL,
+    activities_seen INTEGER NOT NULL DEFAULT 0,
+    inserted_count INTEGER NOT NULL DEFAULT 0,
+    updated_count INTEGER NOT NULL DEFAULT 0,
+    unchanged_count INTEGER NOT NULL DEFAULT 0,
+    detail_fetch_success INTEGER NOT NULL DEFAULT 0,
+    detail_fetch_failed INTEGER NOT NULL DEFAULT 0,
+    history_next TEXT,
+    error_category TEXT,
+    error_type TEXT,
+    summary_json TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_activities_date
+    ON activities(local_activity_date);
+CREATE INDEX IF NOT EXISTS idx_activities_sport_date
+    ON activities(sport_family, local_activity_date);
+CREATE INDEX IF NOT EXISTS idx_activities_type_mode_date
+    ON activities(native_type, sport_mode, local_activity_date);
+CREATE INDEX IF NOT EXISTS idx_activity_streams_activity
+    ON activity_streams(activity_track_id);
+CREATE INDEX IF NOT EXISTS idx_activity_quality_flag
+    ON activity_quality_flags(flag, activity_track_id);
+CREATE INDEX IF NOT EXISTS idx_activity_sync_finished
+    ON activity_sync_runs(finished_at, status);
+"""
+
 
 class Database:
     def __init__(self, path: str | Path) -> None:
@@ -342,6 +514,13 @@ class Database:
                     "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('schema_version', '3')"
                 )
                 self.connection.execute("PRAGMA user_version = 3")
+                current = 3
+            if current < 4:
+                self.connection.executescript(SCHEMA_V4_SQL)
+                self.connection.execute(
+                    "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('schema_version', '4')"
+                )
+                self.connection.execute("PRAGMA user_version = 4")
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -502,6 +681,482 @@ class Database:
             self.store_raw_payload(domain, event_type, sub_type, payload, from_ms, to_ms)
             return self._store_domain_rows_in_transaction(domain, rows)
 
+    def activity_sync_state(
+        self, track_id: str | int, history_record: dict[str, Any]
+    ) -> str:
+        row = self.connection.execute(
+            "SELECT history_fingerprint, detail_complete FROM activities "
+            "WHERE track_id=?",
+            (str(track_id),),
+        ).fetchone()
+        if row is None:
+            return "new"
+        if row["history_fingerprint"] != payload_fingerprint(history_record):
+            return "changed"
+        if not row["detail_complete"]:
+            return "detail_incomplete"
+        return "unchanged"
+
+    def touch_activity(self, track_id: str | int) -> None:
+        self.connection.execute(
+            "UPDATE activities SET last_synced_at=? WHERE track_id=?",
+            (utc_now(), str(track_id)),
+        )
+        self.connection.commit()
+
+    def start_activity_sync(
+        self, from_date: str, to_date: str, timezone_name: str
+    ) -> int:
+        cursor = self.connection.execute(
+            """INSERT INTO activity_sync_runs
+            (started_at, requested_from_date, requested_to_date, timezone, status)
+            VALUES (?, ?, ?, ?, 'running')""",
+            (utc_now(), from_date, to_date, timezone_name),
+        )
+        self.connection.commit()
+        return int(cursor.lastrowid)
+
+    def mark_running_activity_syncs_interrupted(self) -> int:
+        cursor = self.connection.execute(
+            """UPDATE activity_sync_runs SET finished_at=?, status='interrupted',
+            error_category='process', error_type='ProcessInterrupted'
+            WHERE status='running'""",
+            (utc_now(),),
+        )
+        self.connection.commit()
+        return int(cursor.rowcount)
+
+    def finish_activity_sync(self, run_id: int, result: dict[str, Any]) -> None:
+        self.connection.execute(
+            """UPDATE activity_sync_runs SET
+            finished_at=?, status=?, activities_seen=?, inserted_count=?,
+            updated_count=?, unchanged_count=?, detail_fetch_success=?,
+            detail_fetch_failed=?, history_next=?, error_category=?,
+            error_type=?, summary_json=? WHERE id=?""",
+            (
+                utc_now(),
+                result["status"],
+                result.get("activities_seen", 0),
+                result.get("inserted", 0),
+                result.get("updated", 0),
+                result.get("unchanged", 0),
+                result.get("detail_fetch_success", 0),
+                result.get("detail_fetch_failed", 0),
+                None if result.get("history_next") is None
+                else str(result.get("history_next")),
+                result.get("error_category"),
+                result.get("error_type"),
+                json_text(result),
+                run_id,
+            ),
+        )
+        self.connection.commit()
+
+    def store_canonical_activity(
+        self,
+        canonical: dict[str, Any],
+        history_record: dict[str, Any],
+        detail_payload: Any,
+    ) -> str:
+        """Atomically replace one activity and every dependent detail row."""
+        identity = canonical["identity"]
+        track_id = str(identity["track_id"])
+        history_fingerprint = payload_fingerprint(history_record)
+        detail_fingerprint = payload_fingerprint(detail_payload)
+        canonical_fingerprint = payload_fingerprint(canonical)
+        now = utc_now()
+        with self.transaction():
+            history_hash = self.store_raw_payload(
+                "activities",
+                "sport",
+                "history",
+                history_record,
+                int(_number_or_none(identity["track_id"]) or 0),
+                int(_number_or_none(identity["track_id"]) or 0),
+            )
+            detail_hash = self.store_raw_payload(
+                "activities",
+                "sport",
+                "detail",
+                detail_payload,
+                int(_number_or_none(identity["track_id"]) or 0),
+                int(_number_or_none(identity["track_id"]) or 0),
+            )
+            existing = self.connection.execute(
+                "SELECT canonical_fingerprint, history_fingerprint, "
+                "detail_fingerprint, created_at FROM activities "
+                "WHERE track_id=?",
+                (track_id,),
+            ).fetchone()
+            if (
+                existing
+                and existing["canonical_fingerprint"] == canonical_fingerprint
+                and existing["history_fingerprint"] == history_fingerprint
+                and existing["detail_fingerprint"] == detail_fingerprint
+            ):
+                self.connection.execute(
+                    "UPDATE activities SET last_synced_at=? WHERE track_id=?",
+                    (now, track_id),
+                )
+                return "unchanged"
+
+            time_model = canonical.get("time", {})
+            duration = time_model.get("duration_s", {}).get("value")
+            values = (
+                identity.get("source"),
+                identity.get("native_type"),
+                identity.get("sport_mode"),
+                identity.get("sport_name"),
+                identity.get("sport_family"),
+                int(bool(identity.get("zepp_coach_mode")))
+                if identity.get("zepp_coach_mode") is not None else None,
+                identity.get("mapping_confidence"),
+                time_model.get("local_activity_date"),
+                time_model.get("start_time"),
+                time_model.get("end_time"),
+                time_model.get("timezone"),
+                duration,
+                history_fingerprint,
+                detail_fingerprint,
+                canonical_fingerprint,
+                history_hash,
+                detail_hash,
+                1,
+                existing["created_at"] if existing else now,
+                now,
+                now,
+                track_id,
+            )
+            self.connection.execute(
+                """INSERT INTO activities
+                (source, native_type, sport_mode, sport_name, sport_family,
+                 zepp_coach_mode, mapping_confidence, local_activity_date,
+                 start_time, end_time, timezone, duration_s,
+                 history_fingerprint, detail_fingerprint, canonical_fingerprint,
+                 history_payload_hash, detail_payload_hash, detail_complete,
+                 created_at, updated_at, last_synced_at, track_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?)
+                ON CONFLICT(track_id) DO UPDATE SET
+                 source=excluded.source, native_type=excluded.native_type,
+                 sport_mode=excluded.sport_mode, sport_name=excluded.sport_name,
+                 sport_family=excluded.sport_family,
+                 zepp_coach_mode=excluded.zepp_coach_mode,
+                 mapping_confidence=excluded.mapping_confidence,
+                 local_activity_date=excluded.local_activity_date,
+                 start_time=excluded.start_time, end_time=excluded.end_time,
+                 timezone=excluded.timezone, duration_s=excluded.duration_s,
+                 history_fingerprint=excluded.history_fingerprint,
+                 detail_fingerprint=excluded.detail_fingerprint,
+                 canonical_fingerprint=excluded.canonical_fingerprint,
+                 history_payload_hash=excluded.history_payload_hash,
+                 detail_payload_hash=excluded.detail_payload_hash,
+                 detail_complete=excluded.detail_complete,
+                 updated_at=excluded.updated_at, last_synced_at=excluded.last_synced_at""",
+                values,
+            )
+            for table in (
+                "activity_summary_metrics",
+                "activity_streams",
+                "activity_laps",
+                "activity_notes",
+                "activity_quality_flags",
+                "activity_provenance",
+            ):
+                self.connection.execute(
+                    f"DELETE FROM {table} WHERE activity_track_id=?", (track_id,)
+                )
+
+            summary_rows = []
+            for name, metric in canonical.get("summary", {}).items():
+                value = metric.get("value")
+                value_real = (
+                    float(value)
+                    if isinstance(value, (int, float)) and not isinstance(value, bool)
+                    else None
+                )
+                value_text = (
+                    str(value) if value is not None and value_real is None else None
+                )
+                provenance = metric.get("provenance") or {}
+                summary_rows.append((
+                    track_id, name, value_real, value_text, metric.get("unit"),
+                    metric.get("status", "UNKNOWN"),
+                    json_text(metric.get("raw_value")),
+                    provenance.get("source_path"),
+                    metric.get("semantic_confidence"),
+                    json_text(provenance), metric.get("reason"),
+                ))
+            self.connection.executemany(
+                """INSERT INTO activity_summary_metrics
+                (activity_track_id, metric_name, value_real, value_text, unit,
+                 status, raw_value_json, source_path, semantic_confidence,
+                 provenance_json, reason)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                summary_rows,
+            )
+
+            for stream_type, stream in canonical.get("streams", {}).items():
+                metadata = {
+                    key: value for key, value in stream.items()
+                    if key not in {
+                        "samples", "records", "raw_values", "provenance"
+                    }
+                }
+                cursor = self.connection.execute(
+                    """INSERT INTO activity_streams
+                    (activity_track_id, stream_type, status, sample_count, unit,
+                     source_path, semantic_confidence, provenance_json,
+                     metadata_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        track_id, stream_type, stream.get("status", "UNKNOWN"),
+                        stream.get("sample_count", 0), stream.get("unit"),
+                        stream.get("source_path"),
+                        stream.get("semantic_confidence"),
+                        json_text(stream.get("provenance") or {}),
+                        json_text(metadata),
+                    ),
+                )
+                stream_id = int(cursor.lastrowid)
+                records = stream.get("samples", stream.get("records", []))
+                sample_rows = []
+                for index, sample in enumerate(records):
+                    value = sample.get("value", sample.get("value_m"))
+                    value_real = (
+                        float(value)
+                        if isinstance(value, (int, float))
+                        and not isinstance(value, bool) else None
+                    )
+                    value_text = (
+                        str(value)
+                        if value is not None and value_real is None else None
+                    )
+                    sample_rows.append((
+                        stream_id, index, sample.get("offset_s"),
+                        sample.get("timestamp"), value_real, value_text,
+                        sample.get("latitude"), sample.get("longitude"),
+                        sample.get("status", stream.get("status")),
+                        json_text(
+                            sample.get(
+                                "raw",
+                                sample.get(
+                                    "raw_value",
+                                    sample.get("raw_components", sample),
+                                ),
+                            )
+                        ),
+                    ))
+                self.connection.executemany(
+                    """INSERT INTO activity_samples
+                    (stream_id, sample_index, offset_s, timestamp, value_real,
+                     value_text, latitude, longitude, status, raw_value_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    sample_rows,
+                )
+
+            lap_rows = []
+            for lap_type, structure in canonical.get("laps", {}).items():
+                for index, record in enumerate(structure.get("records", [])):
+                    lap_rows.append((
+                        track_id, lap_type, index,
+                        structure.get("status", "UNKNOWN"),
+                        json_text(record), structure.get("source_path"),
+                        json_text(structure.get("provenance") or {}),
+                    ))
+            self.connection.executemany(
+                """INSERT INTO activity_laps
+                (activity_track_id, lap_type, record_index, status,
+                 raw_components_json, source_path, provenance_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                lap_rows,
+            )
+
+            notes = canonical.get("notes", {})
+            self.connection.execute(
+                """INSERT INTO activity_notes
+                (activity_track_id, present, note_text, note_length, source_path,
+                 evidence, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    track_id, int(bool(notes.get("present"))), notes.get("text"),
+                    notes.get("length", 0), notes.get("source_path"),
+                    notes.get("evidence"), now,
+                ),
+            )
+            self.connection.executemany(
+                "INSERT INTO activity_quality_flags(activity_track_id, flag) "
+                "VALUES (?, ?)",
+                [
+                    (track_id, flag)
+                    for flag in canonical.get("quality", {}).get("flags", [])
+                ],
+            )
+            provenance_rows = [
+                (track_id, key, json_text(value))
+                for key, value in canonical.get("provenance", {}).items()
+            ]
+            self.connection.executemany(
+                """INSERT INTO activity_provenance
+                (activity_track_id, provenance_key, provenance_json)
+                VALUES (?, ?, ?)""",
+                provenance_rows,
+            )
+            return "updated" if existing else "inserted"
+
+    def activity_status(self) -> dict[str, Any]:
+        count = int(self.connection.execute(
+            "SELECT COUNT(*) FROM activities"
+        ).fetchone()[0])
+        date_row = self.connection.execute(
+            "SELECT MIN(local_activity_date), MAX(local_activity_date) "
+            "FROM activities"
+        ).fetchone()
+        sports = [
+            dict(row) for row in self.connection.execute(
+                "SELECT sport_family, sport_name, COUNT(*) AS count "
+                "FROM activities GROUP BY sport_family, sport_name "
+                "ORDER BY sport_family, sport_name"
+            ).fetchall()
+        ]
+        stream_coverage = [
+            dict(row) for row in self.connection.execute(
+                "SELECT stream_type, status, COUNT(*) AS activity_count, "
+                "SUM(sample_count) AS sample_count FROM activity_streams "
+                "GROUP BY stream_type, status ORDER BY stream_type, status"
+            ).fetchall()
+        ]
+        latest = self.connection.execute(
+            "SELECT track_id, sport_name, local_activity_date, start_time "
+            "FROM activities ORDER BY COALESCE(start_time, local_activity_date) "
+            "DESC LIMIT 1"
+        ).fetchone()
+        sync = self.connection.execute(
+            "SELECT * FROM activity_sync_runs WHERE finished_at IS NOT NULL "
+            "ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        latest_success = self.connection.execute(
+            "SELECT finished_at FROM activity_sync_runs WHERE status='ok' "
+            "AND finished_at IS NOT NULL ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        return {
+            "database_path": str(self.path),
+            "schema_version": SCHEMA_VERSION,
+            "activity_count": count,
+            "date_range": {"from": date_row[0], "to": date_row[1]},
+            "sport_counts": sports,
+            "latest_activity": dict(latest) if latest else None,
+            "latest_sync": _safe_activity_sync_row(sync),
+            "latest_successful_sync_at": latest_success[0] if latest_success else None,
+            "detail_complete_count": int(self.connection.execute(
+                "SELECT COUNT(*) FROM activities WHERE detail_complete=1"
+            ).fetchone()[0]),
+            "stream_coverage": stream_coverage,
+            "notes": {
+                "activities_with_notes": int(self.connection.execute(
+                    "SELECT COUNT(*) FROM activity_notes WHERE present=1"
+                ).fetchone()[0])
+            },
+            "quality_flag_count": int(self.connection.execute(
+                "SELECT COUNT(*) FROM activity_quality_flags"
+            ).fetchone()[0]),
+        }
+
+    def inspect_activity(
+        self, track_id: str | int, *, include_notes: bool = False
+    ) -> dict[str, Any] | None:
+        activity = self.connection.execute(
+            """SELECT track_id, native_type, sport_mode, sport_name, sport_family,
+            zepp_coach_mode, mapping_confidence, local_activity_date, start_time,
+            end_time, timezone, duration_s, detail_complete, created_at,
+            updated_at, last_synced_at FROM activities WHERE track_id=?""",
+            (str(track_id),),
+        ).fetchone()
+        if activity is None:
+            return None
+        metrics = [
+            dict(row) for row in self.connection.execute(
+                """SELECT metric_name, value_real, value_text, unit, status,
+                source_path, semantic_confidence, reason
+                FROM activity_summary_metrics WHERE activity_track_id=?
+                ORDER BY metric_name""",
+                (str(track_id),),
+            ).fetchall()
+        ]
+        streams = [
+            dict(row) for row in self.connection.execute(
+                """SELECT stream_type, status, sample_count, unit, source_path,
+                semantic_confidence FROM activity_streams
+                WHERE activity_track_id=? ORDER BY stream_type""",
+                (str(track_id),),
+            ).fetchall()
+        ]
+        laps = [
+            dict(row) for row in self.connection.execute(
+                "SELECT lap_type, COUNT(*) AS record_count FROM activity_laps "
+                "WHERE activity_track_id=? GROUP BY lap_type ORDER BY lap_type",
+                (str(track_id),),
+            ).fetchall()
+        ]
+        note = self.connection.execute(
+            "SELECT present, note_length, note_text, source_path, evidence "
+            "FROM activity_notes WHERE activity_track_id=?",
+            (str(track_id),),
+        ).fetchone()
+        notes = dict(note) if note else {
+            "present": 0, "note_length": 0, "source_path": None, "evidence": None
+        }
+        if not include_notes:
+            notes.pop("note_text", None)
+            notes["text_suppressed"] = True
+        flags = [
+            row[0] for row in self.connection.execute(
+                "SELECT flag FROM activity_quality_flags "
+                "WHERE activity_track_id=? ORDER BY flag",
+                (str(track_id),),
+            ).fetchall()
+        ]
+        return {
+            "activity": dict(activity),
+            "summary_metrics": metrics,
+            "streams": streams,
+            "laps": laps,
+            "notes": notes,
+            "quality_flags": flags,
+            "privacy": (
+                "Coordinates, sample/raw values, source identifiers, and raw "
+                "payloads omitted; notes text requires explicit opt-in."
+            ),
+        }
+
+    def query_activities(
+        self,
+        from_date: str,
+        to_date: str,
+        *,
+        sport_family: str | None = None,
+        native_type: int | None = None,
+        sport_mode: int | None = None,
+    ) -> list[dict[str, Any]]:
+        clauses = ["local_activity_date BETWEEN ? AND ?"]
+        parameters: list[Any] = [from_date, to_date]
+        for column, value in (
+            ("sport_family", sport_family),
+            ("native_type", native_type),
+            ("sport_mode", sport_mode),
+        ):
+            if value is not None:
+                clauses.append(f"{column}=?")
+                parameters.append(value)
+        return [
+            dict(row) for row in self.connection.execute(
+                "SELECT track_id, native_type, sport_mode, sport_name, "
+                "sport_family, local_activity_date, start_time, duration_s "
+                "FROM activities WHERE " + " AND ".join(clauses)
+                + " ORDER BY local_activity_date, start_time, track_id",
+                parameters,
+            ).fetchall()
+        ]
+
     def status(self) -> dict[str, Any]:
         tables = (
             "hrv_samples", "hrv_daily", "wake_energy", "exertion_records",
@@ -512,6 +1167,15 @@ class Database:
             table: int(self.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
             for table in tables
         }
+        for table in (
+            "activities", "activity_summary_metrics", "activity_streams",
+            "activity_samples", "activity_laps", "activity_notes",
+            "activity_quality_flags", "activity_provenance",
+            "activity_sync_runs",
+        ):
+            counts[table] = int(
+                self.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            )
         dates: list[str] = []
         for table in tables[:-2]:
             row = self.connection.execute(
@@ -683,6 +1347,10 @@ def inspect_database_file(path: str | Path) -> dict[str, Any]:
             "readiness_records", "sleep_related_readiness", "charge_records",
             "insight_records", "lifeload_records", "raw_payloads", "sync_runs",
             "sync_run_domains",
+            "activities", "activity_summary_metrics", "activity_streams",
+            "activity_samples", "activity_laps", "activity_notes",
+            "activity_quality_flags", "activity_provenance",
+            "activity_sync_runs",
         ]
         counts: dict[str, int] = {}
         for table in tables:

@@ -360,3 +360,47 @@ current availability and sport-specific population.
 
 No canonical storage, downstream integration, production write, deployment,
 or source substitution was added. C017 remains paused.
+
+## Z001.10 — canonical activity model
+
+Production Z001.9 probes proved native detail streams for Hiking, swimming,
+cycling, Ski, and Cross-training, including private Workout Notes in `memo`.
+Added an in-memory canonical history/detail merge with explicit identity,
+time, summary, stream, lap, notes, Coach, quality, and provenance layers.
+
+Central status and capability handling now distinguishes optional sensor
+absence from unsupported, invalid, unknown, and not-applicable data. Gravel
+without a power meter becomes `SUPPORTED_BUT_NOT_RECORDED`; Pool Swim and
+Cross-training without GPS remain `NOT_APPLICABLE`. Open Water Swim raw
+altitude `-2000000` is a field-specific production sentinel checked before
+`/100` scaling and cannot become a real `-20000 m` stream.
+
+History remains summary authority and detail only enriches. A track-ID
+mismatch is flagged and the foreign detail is not merged. Stream-local
+offsets prevent index alignment across different sample counts. A safe
+serializer exposes counts/statuses but suppresses coordinates, sample values,
+private `source`, and Workout Notes text.
+
+No persistent activity schema or downstream coach change was introduced.
+C017 remains paused.
+
+## Z001.11 — native activity persistence
+
+Chose the existing Zepp SQLite file for additive activity storage so schema
+migrations, WAL, backups, integrity checks, and raw-payload deduplication stay
+unified while activity sync/freshness remain separate. Schema v4 adds
+relational identity, metric, stream/sample, lap, private Notes, quality,
+provenance, and activity-sync tables.
+
+Implemented bounded one-page incremental synchronization. New, changed, or
+incomplete activities fetch detail; unchanged complete activities skip it.
+Explicit `--refresh-details` supports Notes/detail-only revisions. Every
+activity version is replaced atomically, sample inserts are batched, and
+history/detail/canonical fingerprints preserve updates without duplicates.
+Nonterminal pagination, hard-bound truncation, or individual detail failures
+produce factual `partial` status. Zero activities with a terminal response is
+successful.
+
+Safe status and inspection commands omit coordinates, raw samples, native
+source values, and Notes text by default. Existing health tables and freshness
+semantics remain unchanged. C017 remains paused.

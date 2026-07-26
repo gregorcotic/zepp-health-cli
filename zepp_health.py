@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import os
 import sqlite3
 import sys
@@ -991,11 +992,13 @@ def _activity_number(value: Any) -> int | float | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
-        return value
+        return value if math.isfinite(value) else None
     if isinstance(value, str):
         try:
             number = float(value)
         except ValueError:
+            return None
+        if not math.isfinite(number):
             return None
         return int(number) if number.is_integer() else number
     return None
@@ -1897,6 +1900,912 @@ ACTIVITY_DETAIL_TEXT_KEYS = {
     "comment", "comments", "memo", "content", "sport_note", "workout_note",
     "workoutnotes", "track_note", "tracknote", "user_note", "usernote",
 }
+CANONICAL_METRIC_STATUSES = {
+    "AVAILABLE",
+    "SUPPORTED_BUT_NOT_RECORDED",
+    "NOT_APPLICABLE",
+    "UNSUPPORTED",
+    "SENTINEL_UNAVAILABLE",
+    "INVALID",
+    "UNKNOWN",
+}
+ACTIVITY_DETAIL_SENTINELS = {
+    # Production-proven for Open Water Swim detail.altitude in Z001.9.
+    "altitude": {-2000000},
+}
+ACTIVITY_DETAIL_SCHEMA_ONLY_FIELDS = {
+    "strengthAssess", "strengthSets", "hyroxBlocks", "hyroxRepLap",
+    "hyroxTimelines",
+}
+ACTIVITY_DETAIL_PRODUCTION_PROVEN_PAIRS = {
+    (22, 0),    # Hiking / Ojstrica
+    (130, 0),   # Cross-training
+    (14, 0),    # Pool Swim
+    (15, 0),    # Open Water Swim
+    (208, 0),   # Gravel Cycling
+    (105, 0),   # Ski
+}
+ACTIVITY_ALTITUDE_SCALE_PRODUCTION_PROVEN_PAIRS = {
+    (22, 0),
+    (208, 0),
+    (105, 0),
+}
+ACTIVITY_DETAIL_STREAM_FIELDS = tuple(dict.fromkeys(
+    ACTIVITY_DETAIL_STREAM_FIELDS + (
+        "pool_swim_pace", "pool_stroke_speed", "currentDistance",
+        *sorted(ACTIVITY_DETAIL_SCHEMA_ONLY_FIELDS),
+    )
+))
+
+
+def _canonical_provenance(
+    endpoint: str,
+    source_path: str,
+    *,
+    raw_encoding: str = "scalar",
+    normalization: str = "identity",
+    semantic_rule: str | None = None,
+    confidence: str = "PRODUCTION_PROVEN",
+) -> dict[str, Any]:
+    return {
+        "endpoint": endpoint,
+        "source_path": source_path,
+        "raw_encoding": raw_encoding,
+        "normalization": normalization,
+        "semantic_rule": semantic_rule,
+        "confidence": confidence,
+    }
+
+
+def _canonical_metric(
+    value: Any,
+    unit: str | None,
+    status: str,
+    *,
+    raw_value: Any = None,
+    provenance: dict[str, Any] | None = None,
+    semantic_confidence: str = "PRODUCTION_PROVEN",
+    reason: str | None = None,
+) -> dict[str, Any]:
+    if status not in CANONICAL_METRIC_STATUSES:
+        raise ValueError(f"Unknown canonical metric status: {status}")
+    metric = {
+        "value": value,
+        "unit": unit,
+        "status": status,
+        "raw_value": raw_value,
+        "provenance": provenance,
+        "semantic_confidence": semantic_confidence,
+    }
+    if reason:
+        metric["reason"] = reason
+    return metric
+
+
+def _canonical_detail_payload(detail_response: Any) -> dict[str, Any] | None:
+    if not isinstance(detail_response, dict):
+        return None
+    payload = detail_response.get("data")
+    return payload if isinstance(payload, dict) else None
+
+
+def _canonical_sport_capabilities(
+    mapping: dict[str, Any] | None,
+) -> dict[str, str]:
+    if mapping is None:
+        return {
+            key: "UNKNOWN"
+            for key in ("gps", "altitude", "heart_rate", "cadence", "power", "laps")
+        }
+    family = mapping["sport_family"]
+    name = mapping["sport_name"]
+    gps = (
+        "NOT_APPLICABLE"
+        if name in {"Pool Swim", "Cross-training"}
+        else "EXPECTED"
+    )
+    altitude = (
+        "NOT_APPLICABLE"
+        if family in {"Swimming", "Cross-training"}
+        else "SUPPORTED"
+    )
+    return {
+        "gps": gps,
+        "altitude": altitude,
+        "heart_rate": "SUPPORTED",
+        "cadence": "SUPPORTED_OPTIONAL_SENSOR" if family == "Cycling"
+        else "NOT_APPLICABLE",
+        "power": "SUPPORTED_OPTIONAL_SENSOR" if family == "Cycling"
+        else "NOT_APPLICABLE",
+        "laps": "SUPPORTED" if name == "Pool Swim" else "UNKNOWN",
+    }
+
+
+def _canonical_numeric_entries(value: Any) -> tuple[list[Any], list[float], bool]:
+    raw_entries = _detail_entries(value)
+    numeric: list[float] = []
+    valid = True
+    for item in raw_entries:
+        if isinstance(item, bool):
+            valid = False
+            continue
+        try:
+            number = float(item)
+        except (TypeError, ValueError):
+            valid = False
+            continue
+        if not math.isfinite(number):
+            valid = False
+            continue
+        numeric.append(number)
+    return raw_entries, numeric, valid and len(raw_entries) == len(numeric)
+
+
+def _canonical_time_offsets(value: Any) -> tuple[list[float], bool]:
+    raw_entries, deltas, valid = _canonical_numeric_entries(value)
+    if not raw_entries or not valid:
+        return [], False
+    offsets: list[float] = []
+    elapsed = 0.0
+    for delta in deltas:
+        if delta < 0:
+            return [], False
+        elapsed += delta
+        offsets.append(elapsed)
+    return offsets, all(
+        later >= earlier for earlier, later in zip(offsets, offsets[1:])
+    )
+
+
+def _canonical_gps_stream(
+    payload: dict[str, Any],
+    capability: str,
+    *,
+    evidence_confidence: str,
+) -> dict[str, Any]:
+    entries = _detail_entries(payload.get("longitude_latitude"))
+    if not entries:
+        status = "NOT_APPLICABLE" if capability == "NOT_APPLICABLE" else "UNKNOWN"
+        return {
+            "status": status,
+            "sample_count": 0,
+            "samples": [],
+            "source_path": "detail.longitude_latitude",
+            "semantic_confidence": evidence_confidence,
+        }
+    time_entries = _detail_entries(payload.get("time"))
+    offsets, offsets_valid = _canonical_time_offsets(payload.get("time"))
+    samples: list[dict[str, Any]] = []
+    longitude_raw = 0
+    latitude_raw = 0
+    valid = True
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, str):
+            valid = False
+            break
+        parts = entry.split(",")
+        if len(parts) < 2:
+            valid = False
+            break
+        try:
+            first = int(parts[0])
+            second = int(parts[1])
+        except ValueError:
+            valid = False
+            break
+        longitude_raw = first if index == 0 else longitude_raw + first
+        latitude_raw = second if index == 0 else latitude_raw + second
+        longitude = longitude_raw / 100_000_000
+        latitude = latitude_raw / 100_000_000
+        if not (-180 <= longitude <= 180 and -90 <= latitude <= 90):
+            valid = False
+            break
+        samples.append({
+            "offset_s": offsets[index] if offsets_valid and index < len(offsets) else None,
+            "longitude": longitude,
+            "latitude": latitude,
+            "raw": [first, second],
+        })
+    return {
+        "status": "AVAILABLE" if valid and len(samples) == len(entries) else "INVALID",
+        "sample_count": len(entries),
+        "samples": samples if valid and len(samples) == len(entries) else [],
+        "source_path": "detail.longitude_latitude",
+        "timestamp_source_path": "detail.time" if offsets_valid else None,
+        "timestamp_alignment_status": (
+            "MATCHED"
+            if offsets_valid and len(offsets) == len(entries)
+            else (
+                "INVALID"
+                if time_entries and not offsets_valid
+                else ("UNAVAILABLE" if not time_entries else "COUNT_MISMATCH")
+            )
+        ),
+        "semantic_confidence": evidence_confidence,
+        "provenance": _canonical_provenance(
+            "/v1/sport/run/detail.json",
+            "detail.longitude_latitude",
+            raw_encoding="semicolon delta coordinate pairs",
+            normalization="delta accumulation then /1e8",
+            confidence=evidence_confidence,
+        ),
+    }
+
+
+def _canonical_altitude_stream(
+    payload: dict[str, Any],
+    capability: str,
+    *,
+    scaling_confidence: str,
+) -> dict[str, Any]:
+    raw_entries, values, valid = _canonical_numeric_entries(payload.get("altitude"))
+    if not raw_entries:
+        status = "NOT_APPLICABLE" if capability == "NOT_APPLICABLE" else "UNKNOWN"
+        return {
+            "status": status,
+            "sample_count": 0,
+            "samples": [],
+            "source_path": "detail.altitude",
+            "semantic_confidence": scaling_confidence,
+        }
+    sentinel_values = ACTIVITY_DETAIL_SENTINELS["altitude"]
+    if valid and values and all(value in sentinel_values for value in values):
+        return {
+            "status": "SENTINEL_UNAVAILABLE",
+            "sample_count": len(raw_entries),
+            "samples": [
+                {
+                    "raw_value": raw_value,
+                    "value_m": None,
+                    "status": "SENTINEL_UNAVAILABLE",
+                }
+                for raw_value in raw_entries
+            ],
+            "source_path": "detail.altitude",
+            "semantic_confidence": "PRODUCTION_PROVEN",
+            "reason": "production_proven_open_water_altitude_sentinel",
+            "provenance": _canonical_provenance(
+                "/v1/sport/run/detail.json",
+                "detail.altitude",
+                raw_encoding="semicolon numeric records",
+                normalization="sentinel classification before scaling",
+                confidence="PRODUCTION_PROVEN",
+            ),
+        }
+    if not valid or any(value in sentinel_values for value in values):
+        return {
+            "status": "INVALID",
+            "sample_count": len(raw_entries),
+            "samples": [],
+            "raw_values": raw_entries,
+            "source_path": "detail.altitude",
+            "semantic_confidence": "UNKNOWN",
+            "reason": "mixed_sentinel_or_nonnumeric_altitude_stream",
+        }
+    return {
+        "status": "AVAILABLE",
+        "sample_count": len(values),
+        "samples": [
+            {
+                "raw_value": raw_value,
+                "value_m": value / 100,
+                "status": "AVAILABLE",
+            }
+            for raw_value, value in zip(raw_entries, values)
+        ],
+        "source_path": "detail.altitude",
+        "unit": "m",
+        "scale": 0.01,
+        "semantic_confidence": scaling_confidence,
+        "provenance": _canonical_provenance(
+            "/v1/sport/run/detail.json",
+            "detail.altitude",
+            raw_encoding="semicolon numeric records",
+            normalization="raw / 100 metres",
+            confidence=scaling_confidence,
+        ),
+    }
+
+
+def _canonical_delta_pair_stream(
+    payload: dict[str, Any],
+    field: str,
+    *,
+    capability: str = "SUPPORTED",
+    unit: str | None = None,
+    evidence_confidence: str = "OBSERVED_IN_PUBLIC_IMPLEMENTATION",
+) -> dict[str, Any]:
+    entries = _detail_entries(payload.get(field))
+    if not entries:
+        if capability == "NOT_APPLICABLE":
+            status = "NOT_APPLICABLE"
+        elif capability == "SUPPORTED_OPTIONAL_SENSOR":
+            status = "SUPPORTED_BUT_NOT_RECORDED"
+        else:
+            status = "UNKNOWN"
+        return {
+            "status": status,
+            "sample_count": 0,
+            "samples": [],
+            "source_path": f"detail.{field}",
+            "semantic_confidence": evidence_confidence,
+        }
+    elapsed = 0
+    current = 0
+    samples: list[dict[str, Any]] = []
+    for entry in entries:
+        if not isinstance(entry, str):
+            samples = []
+            break
+        parts = entry.split(",")
+        if len(parts) < 2:
+            samples = []
+            break
+        try:
+            delta_time = int(parts[0] or 1)
+            if delta_time < 0:
+                samples = []
+                break
+            elapsed += delta_time
+            current += int(parts[1])
+        except ValueError:
+            samples = []
+            break
+        samples.append({
+            "offset_s": elapsed,
+            "value": current,
+            "raw": [parts[0], parts[1]],
+        })
+    return {
+        "status": "AVAILABLE" if len(samples) == len(entries) else "INVALID",
+        "sample_count": len(entries),
+        "samples": samples if len(samples) == len(entries) else [],
+        "source_path": f"detail.{field}",
+        "unit": unit,
+        "semantic_confidence": evidence_confidence,
+        "provenance": _canonical_provenance(
+            "/v1/sport/run/detail.json",
+            f"detail.{field}",
+            raw_encoding="semicolon delta-time/delta-value pairs",
+            normalization="independent delta accumulation",
+            confidence=(
+                evidence_confidence
+            ),
+        ),
+    }
+
+
+def _canonical_structural_stream(
+    payload: dict[str, Any],
+    field: str,
+    *,
+    capability: str = "UNKNOWN",
+) -> dict[str, Any]:
+    entries = _detail_entries(payload.get(field))
+    if not entries:
+        if capability == "NOT_APPLICABLE":
+            status = "NOT_APPLICABLE"
+        elif capability == "SUPPORTED_OPTIONAL_SENSOR":
+            status = "SUPPORTED_BUT_NOT_RECORDED"
+        else:
+            status = "UNKNOWN"
+        return {
+            "status": status,
+            "sample_count": 0,
+            "records": [],
+            "source_path": f"detail.{field}",
+            "semantic_confidence": "UNKNOWN",
+        }
+    numeric_entries = [_activity_number(item) for item in entries]
+    if (
+        numeric_entries
+        and all(number is not None for number in numeric_entries)
+        and all(
+            _activity_is_unavailable_sentinel(number)
+            for number in numeric_entries
+        )
+    ):
+        return {
+            "status": "SENTINEL_UNAVAILABLE",
+            "sample_count": len(entries),
+            "records": [{"raw_value": item} for item in entries],
+            "source_path": f"detail.{field}",
+            "semantic_confidence": "PRODUCTION_PROVEN",
+            "reason": "known_activity_sentinel_values",
+        }
+    records = []
+    for entry in entries:
+        if isinstance(entry, str):
+            records.append({"raw_components": entry.split(",")})
+        else:
+            records.append({"raw_type": type(entry).__name__})
+    return {
+        "status": "AVAILABLE",
+        "sample_count": len(entries),
+        "records": records,
+        "source_path": f"detail.{field}",
+        "semantic_confidence": "UNKNOWN",
+        "provenance": _canonical_provenance(
+            "/v1/sport/run/detail.json",
+            f"detail.{field}",
+            raw_encoding="semicolon records",
+            normalization="structural preservation only",
+            confidence="SCHEMA_DISCOVERED",
+        ),
+    }
+
+
+def _canonical_history_metric(
+    record: dict[str, Any],
+    field: str,
+    *,
+    unit: str | None,
+    semantic_confidence: str = "PRODUCTION_PROVEN",
+) -> dict[str, Any]:
+    raw = record.get(field)
+    value = _activity_usable_metric_number(raw)
+    if _activity_is_unavailable_sentinel(raw):
+        status = "SENTINEL_UNAVAILABLE"
+    elif value is not None:
+        status = "AVAILABLE"
+    elif field in record:
+        status = "INVALID" if raw not in (None, "") else "UNKNOWN"
+    else:
+        status = "UNKNOWN"
+    return _canonical_metric(
+        value,
+        unit,
+        status,
+        raw_value=raw if field in record else None,
+        provenance=_canonical_provenance(
+            "/v1/sport/run/history.json",
+            f"history.summary.{field}",
+            confidence=semantic_confidence,
+        ),
+        semantic_confidence=semantic_confidence if value is not None else "UNKNOWN",
+    )
+
+
+def _canonical_activity_time(
+    history_record: dict[str, Any],
+    timezone_name: str,
+) -> dict[str, Any]:
+    zone = ZoneInfo(timezone_name)
+    track_id = _activity_number(history_record.get("trackid"))
+    start: datetime | None = None
+    if isinstance(track_id, (int, float)) and 946684800 <= track_id <= 4102444800:
+        start = datetime.fromtimestamp(track_id, zone)
+    end_raw = _activity_number(history_record.get("end_time"))
+    end: datetime | None = None
+    if isinstance(end_raw, (int, float)):
+        if end_raw >= 1_000_000_000_000:
+            end_raw /= 1000
+        if 946684800 <= end_raw <= 4102444800:
+            end = datetime.fromtimestamp(end_raw, zone)
+    duration, duration_field = _activity_duration_seconds(history_record)
+    return {
+        "timezone": timezone_name,
+        "start_time": start.isoformat() if start else None,
+        "end_time": end.isoformat() if end else None,
+        "local_activity_date": start.date().isoformat() if start else None,
+        "duration_s": _canonical_metric(
+            duration,
+            "s",
+            "AVAILABLE" if duration is not None else "UNKNOWN",
+            raw_value=history_record.get(duration_field) if duration_field else None,
+            provenance=(
+                _canonical_provenance(
+                    "/v1/sport/run/history.json",
+                    f"history.summary.{duration_field}",
+                    normalization=(
+                        "identity seconds"
+                        if duration_field == "run_time"
+                        else "milliseconds / 1000"
+                    ),
+                )
+                if duration_field else None
+            ),
+        ),
+        "start_time_provenance": (
+            _canonical_provenance(
+                "/v1/sport/run/history.json",
+                "history.summary.trackid",
+                normalization="Unix epoch seconds to requested timezone",
+                confidence="INFERRED",
+            )
+            if start else None
+        ),
+    }
+
+
+def canonicalize_activity(
+    history_record: dict[str, Any],
+    detail_response: Any,
+    *,
+    timezone_name: str = FRESHNESS_TIMEZONE,
+) -> dict[str, Any]:
+    """Merge Zepp history and native detail without overwriting raw evidence."""
+    payload = _canonical_detail_payload(detail_response)
+    mapping = _activity_sport_mapping(history_record)
+    capabilities = _canonical_sport_capabilities(mapping)
+    mapping_key = (
+        (mapping["type"], mapping["sport_mode"]) if mapping is not None else None
+    )
+    detail_confidence = (
+        "PRODUCTION_PROVEN"
+        if mapping_key in ACTIVITY_DETAIL_PRODUCTION_PROVEN_PAIRS
+        else "OBSERVED_IN_PUBLIC_IMPLEMENTATION"
+    )
+    altitude_scaling_confidence = (
+        "PRODUCTION_PROVEN"
+        if mapping_key in ACTIVITY_ALTITUDE_SCALE_PRODUCTION_PROVEN_PAIRS
+        else "OBSERVED_IN_PUBLIC_IMPLEMENTATION"
+    )
+    history_track_id = history_record.get("trackid", history_record.get("trackId"))
+    detail_track_id = (
+        payload.get("trackid", payload.get("trackId")) if payload is not None else None
+    )
+    detail_recognized = payload is not None
+    track_match = (
+        detail_recognized
+        and detail_track_id is not None
+        and str(history_track_id) == str(detail_track_id)
+    )
+
+    quality_flags: list[str] = []
+    if not detail_recognized:
+        quality_flags.append("DETAIL_WRAPPER_UNRECOGNIZED")
+    elif detail_track_id is None:
+        quality_flags.append("DETAIL_TRACK_ID_MISSING")
+    elif not track_match:
+        quality_flags.append("HISTORY_DETAIL_TRACK_ID_MISMATCH")
+
+    # Never enrich one history activity with another activity's detail payload.
+    payload_for_streams = payload if track_match else {}
+    gps = _canonical_gps_stream(
+        payload_for_streams,
+        capabilities["gps"],
+        evidence_confidence=detail_confidence,
+    )
+    altitude = _canonical_altitude_stream(
+        payload_for_streams,
+        capabilities["altitude"],
+        scaling_confidence=altitude_scaling_confidence,
+    )
+    heart_rate = _canonical_delta_pair_stream(
+        payload_for_streams,
+        "heart_rate",
+        unit="bpm",
+        evidence_confidence=detail_confidence,
+    )
+    observation_capabilities = capabilities if track_match else {
+        **capabilities,
+        "cadence": "UNKNOWN",
+        "power": "UNKNOWN",
+    }
+    cadence = _canonical_structural_stream(
+        payload_for_streams,
+        "cadence",
+        capability=observation_capabilities["cadence"],
+    )
+    power = _canonical_structural_stream(
+        payload_for_streams,
+        "power_meter",
+        capability=observation_capabilities["power"],
+    )
+    if gps["status"] == "AVAILABLE":
+        quality_flags.append("GPS_STREAM_AVAILABLE")
+    elif capabilities["gps"] == "EXPECTED" and track_match:
+        quality_flags.append("GPS_STREAM_MISSING")
+    if gps.get("timestamp_alignment_status") == "COUNT_MISMATCH":
+        quality_flags.append("GPS_TIME_COUNT_MISMATCH")
+    elif gps.get("timestamp_alignment_status") == "INVALID":
+        quality_flags.append("GPS_TIME_INVALID")
+    if altitude["status"] == "SENTINEL_UNAVAILABLE":
+        quality_flags.append("ALTITUDE_SENTINEL")
+    if power["status"] == "SUPPORTED_BUT_NOT_RECORDED":
+        quality_flags.append("POWER_SENSOR_NOT_RECORDED")
+
+    notes_text = payload_for_streams.get("memo")
+    notes_present = isinstance(notes_text, str) and bool(notes_text)
+    if notes_present:
+        quality_flags.append("WORKOUT_NOTES_AVAILABLE")
+
+    semantics = interpret_activity_metrics(history_record)
+    normalized = semantics.get("normalized_metrics", {})
+    distance = normalized.get("distance_m", {})
+    calories = normalized.get("calories_kcal", {})
+    def semantic_metric(name: str, *, unit: str = "m") -> dict[str, Any]:
+        item = normalized.get(name)
+        if not isinstance(item, dict):
+            if mapping is None:
+                missing_status = "UNKNOWN"
+            elif name == "vertical_descent_m":
+                missing_status = "NOT_APPLICABLE"
+            elif mapping["sport_family"] in {"Swimming", "Cross-training"}:
+                missing_status = "NOT_APPLICABLE"
+            else:
+                missing_status = "UNKNOWN"
+            return _canonical_metric(None, unit, missing_status)
+        source_field = item.get("source_field")
+        raw_value = history_record.get(source_field) if source_field else None
+        if source_field and _activity_is_unavailable_sentinel(raw_value):
+            status = "SENTINEL_UNAVAILABLE"
+        elif item.get("value") is not None:
+            status = "AVAILABLE"
+        elif item.get("reason") == "ski_lift_ascent_is_not_athlete_powered_climbing":
+            status = "NOT_APPLICABLE"
+        else:
+            status = "UNKNOWN"
+        return _canonical_metric(
+            item.get("value"),
+            unit,
+            status,
+            raw_value=raw_value,
+            provenance=(
+                _canonical_provenance(
+                    "/v1/sport/run/history.json",
+                    f"history.summary.{source_field}",
+                    semantic_rule=item.get("reason"),
+                    confidence=item.get("semantic_confidence", "UNKNOWN"),
+                )
+                if source_field else None
+            ),
+            semantic_confidence=item.get("semantic_confidence", "UNKNOWN"),
+            reason=item.get("reason"),
+        )
+
+    time_model = _canonical_activity_time(history_record, timezone_name)
+    summary = {
+        "duration_s": time_model["duration_s"],
+        "distance_m": _canonical_metric(
+            distance.get("value"),
+            "m",
+            "AVAILABLE" if distance.get("value") is not None else "UNKNOWN",
+            raw_value=history_record.get(distance.get("source_field"))
+            if distance.get("source_field") else None,
+            provenance=(
+                _canonical_provenance(
+                    "/v1/sport/run/history.json",
+                    f"history.summary.{distance.get('source_field')}",
+                    semantic_rule="established sport-aware distance precedence",
+                )
+                if distance.get("source_field") else None
+            ),
+            semantic_confidence=distance.get("semantic_confidence", "UNKNOWN"),
+        ),
+        "calories_kcal": _canonical_metric(
+            calories.get("value"),
+            "kcal",
+            "AVAILABLE" if calories.get("value") is not None else "UNKNOWN",
+            raw_value=history_record.get("calorie"),
+            provenance=_canonical_provenance(
+                "/v1/sport/run/history.json", "history.summary.calorie"
+            ),
+            semantic_confidence=calories.get("semantic_confidence", "UNKNOWN"),
+        ),
+        "heart_rate_avg_bpm": _canonical_history_metric(
+            history_record, "avg_heart_rate", unit="bpm"
+        ),
+        "heart_rate_min_bpm": _canonical_history_metric(
+            history_record, "min_heart_rate", unit="bpm"
+        ),
+        "heart_rate_max_bpm": _canonical_history_metric(
+            history_record, "max_heart_rate", unit="bpm"
+        ),
+        "training_load": _canonical_history_metric(
+            history_record, "exercise_load", unit="Zepp load"
+        ),
+        "aerobic_training_effect": _canonical_history_metric(
+            history_record,
+            "te",
+            unit="Zepp raw TE",
+            semantic_confidence="UNKNOWN",
+        ),
+        "anaerobic_training_effect": _canonical_history_metric(
+            history_record,
+            "anaerobic_te",
+            unit="Zepp raw TE",
+            semantic_confidence="UNKNOWN",
+        ),
+        "rpe": _canonical_history_metric(
+            history_record, "rpe", unit="Zepp RPE"
+        ),
+        "average_pace": _canonical_history_metric(
+            history_record,
+            "avg_pace",
+            unit="Zepp raw pace",
+            semantic_confidence="UNKNOWN",
+        ),
+        "maximum_pace": _canonical_history_metric(
+            history_record,
+            "max_pace",
+            unit="Zepp raw pace",
+            semantic_confidence="UNKNOWN",
+        ),
+        "average_cadence": _canonical_history_metric(
+            history_record,
+            "avg_cadence",
+            unit="sport-specific cadence",
+            semantic_confidence="INFERRED",
+        ),
+        "maximum_cadence": _canonical_history_metric(
+            history_record,
+            "max_cadence",
+            unit="sport-specific cadence",
+            semantic_confidence="INFERRED",
+        ),
+        "average_power_w": _canonical_history_metric(
+            history_record, "average_power", unit="W"
+        ),
+        "maximum_power_w": _canonical_history_metric(
+            history_record, "max_power", unit="W"
+        ),
+        "downhill_run_count": _canonical_history_metric(
+            history_record, "downhill_num", unit="count"
+        ),
+        "reported_elevation_gain_m": semantic_metric("elevation_gain_m"),
+        "reported_elevation_loss_m": semantic_metric("elevation_loss_m"),
+        "vertical_descent_m": semantic_metric("vertical_descent_m"),
+        "derived_elevation_gain_m": _canonical_metric(
+            None,
+            "m",
+            "UNKNOWN",
+            reason="future_altitude_validation_slot",
+        ),
+    }
+    return {
+        "schema_version": 1,
+        "identity": {
+            "track_id": history_track_id,
+            "source": history_record.get("source"),
+            "native_type": history_record.get("type"),
+            "sport_mode": history_record.get("sport_mode"),
+            "sport_name": mapping["sport_name"] if mapping else None,
+            "sport_family": mapping["sport_family"] if mapping else None,
+            "zepp_coach_mode": mapping["zepp_coach_mode"] if mapping else None,
+            "mapping_confidence": mapping["confidence"] if mapping else "UNKNOWN",
+        },
+        "time": time_model,
+        "sport_capabilities": capabilities,
+        "summary": summary,
+        "streams": {
+            "gps": gps,
+            "altitude": altitude,
+            "heart_rate": heart_rate,
+            "cadence": cadence,
+            "power": power,
+            "speed": _canonical_structural_stream(payload_for_streams, "speed"),
+            "pace": _canonical_structural_stream(payload_for_streams, "pace"),
+        },
+        "laps": {
+            "lap": _canonical_structural_stream(
+                payload_for_streams, "lap", capability=capabilities["laps"]
+            ),
+            "pool_swim_pace": _canonical_structural_stream(
+                payload_for_streams, "pool_swim_pace"
+            ),
+            "pool_stroke_speed": _canonical_structural_stream(
+                payload_for_streams, "pool_stroke_speed"
+            ),
+            "current_distance": _canonical_structural_stream(
+                payload_for_streams, "currentDistance"
+            ),
+        },
+        "strength": {
+            field: {
+                "status": (
+                    "AVAILABLE"
+                    if _detail_entries(payload_for_streams.get(field))
+                    else "UNKNOWN"
+                ),
+                "schema_evidence": "SCHEMA_DISCOVERED",
+                "structure": _detail_stream_shape(payload_for_streams.get(field)),
+            }
+            for field in sorted(ACTIVITY_DETAIL_SCHEMA_ONLY_FIELDS)
+        },
+        "notes": {
+            "present": notes_present,
+            "length": len(notes_text) if notes_present else 0,
+            "text": notes_text if notes_present else None,
+            "source_path": "detail.memo",
+            "evidence": (
+                "PRODUCTION_PROVEN"
+                if mapping_key == (130, 0)
+                else "SCHEMA_DISCOVERED"
+            ),
+        },
+        "coach": {
+            "zepp_coach_mode": mapping["zepp_coach_mode"] if mapping else None,
+            "segments": _canonical_structural_stream(
+                payload_for_streams, "coaching_segment"
+            ),
+        },
+        "quality": {
+            "flags": sorted(set(quality_flags)),
+            "history_detail_identity_match": track_match,
+            "stream_alignment": "INDEPENDENT_OFFSETS_NO_INDEX_ALIGNMENT",
+        },
+        "provenance": {
+            "history_endpoint": "/v1/sport/run/history.json",
+            "detail_endpoint": "/v1/sport/run/detail.json",
+            "history_raw_fields": sorted(str(key) for key in history_record),
+            "detail_raw_fields": sorted(str(key) for key in payload_for_streams),
+            "history_remains_summary_authority": True,
+            "detail_enrichment_only": True,
+        },
+    }
+
+
+def safe_canonical_activity(activity: dict[str, Any]) -> dict[str, Any]:
+    """Serialize canonical activity without coordinates, notes, or source IDs."""
+    safe = {
+        "schema_version": activity.get("schema_version"),
+        "identity": {
+            key: value
+            for key, value in activity.get("identity", {}).items()
+            if key != "source"
+        },
+        "time": activity.get("time"),
+        "sport_capabilities": activity.get("sport_capabilities"),
+        "summary": activity.get("summary"),
+        "streams": {},
+        "laps": {},
+        "strength": activity.get("strength"),
+        "notes": {
+            "present": activity.get("notes", {}).get("present", False),
+            "length": activity.get("notes", {}).get("length", 0),
+            "source_path": activity.get("notes", {}).get("source_path"),
+            "text_suppressed": True,
+        },
+        "coach": {
+            "zepp_coach_mode": activity.get("coach", {}).get("zepp_coach_mode"),
+            "segments": {
+                key: value
+                for key, value in activity.get("coach", {}).get(
+                    "segments", {}
+                ).items()
+                if key not in {"records", "samples"}
+            },
+        },
+        "quality": activity.get("quality"),
+        "provenance": activity.get("provenance"),
+        "privacy": (
+            "Coordinates, sample values, Workout Notes text, source values, "
+            "credentials, user/device identifiers, URLs, and raw payloads omitted."
+        ),
+    }
+    for name, stream in activity.get("streams", {}).items():
+        values = []
+        if name == "altitude":
+            values = [
+                sample.get("value_m")
+                for sample in stream.get("samples", [])
+                if sample.get("value_m") is not None
+            ]
+        elif name == "heart_rate":
+            values = [
+                sample.get("value")
+                for sample in stream.get("samples", [])
+                if sample.get("value") is not None
+            ]
+        safe["streams"][name] = {
+            key: value
+            for key, value in stream.items()
+            if key not in {"samples", "records", "raw_values"}
+        }
+        if values:
+            safe["streams"][name]["minimum"] = min(values)
+            safe["streams"][name]["maximum"] = max(values)
+        safe["streams"][name]["sample_values_suppressed"] = True
+    for name, structure in activity.get("laps", {}).items():
+        safe["laps"][name] = {
+            key: value
+            for key, value in structure.items()
+            if key not in {"records", "samples"}
+        }
+        safe["laps"][name]["record_values_suppressed"] = True
+    return safe
 
 
 def _detail_entries(value: Any) -> list[Any]:
@@ -2098,8 +3007,8 @@ def diagnose_activity_detail_payload(
                 else None
             ),
             "timestamp_semantics": (
-                "delta offsets observed in public exporter; production "
-                "contract not yet verified"
+                "delta offsets observed in public exporter and verified by "
+                "bounded Z001.9 production stream probes"
             ),
         },
         "altitude": {
@@ -2128,7 +3037,8 @@ def diagnose_activity_detail_payload(
                 else None
             ),
             "scaling_evidence": (
-                "/100 in observed public exporter; not production-proven here"
+                "/100 production-supported by plausible Hiking, Gravel, and "
+                "Ski altitude ranges; do not generalize beyond tested sports"
             ),
         },
         "heart_rate": {
@@ -2145,7 +3055,7 @@ def diagnose_activity_detail_payload(
             - set(ACTIVITY_DETAIL_STREAM_FIELDS)
             - {"trackid", "trackId", "source", "version", "provider"}
         ),
-        "evidence_level": "OBSERVED_IN_PUBLIC_IMPLEMENTATION",
+        "evidence_level": "PRODUCTION_PROVEN",
     }
 
 
@@ -2311,8 +3221,8 @@ def cmd_diagnose_activity_detail(args: argparse.Namespace) -> None:
             "history_path": "/v1/sport/run/history.json",
             "detail_path": "/v1/sport/run/detail.json",
             "detail_query_parameters": ["trackid", "source", "r"],
-            "evidence_level": "OBSERVED_IN_PUBLIC_IMPLEMENTATION",
-            "production_verification_required": True,
+            "evidence_level": "PRODUCTION_PROVEN",
+            "production_verification_required": False,
         },
         "request": {
             "from_date": args.from_date,
@@ -2333,6 +3243,305 @@ def cmd_diagnose_activity_detail(args: argparse.Namespace) -> None:
         "detail": diagnostic,
     }
     _emit_json(report, args)
+
+
+def cmd_diagnose_canonical_activity(args: argparse.Namespace) -> None:
+    timezone_name = args.timezone or load_config().get("timezone") or FRESHNESS_TIMEZONE
+    try:
+        start_track_id, stop_track_id = _activity_diagnostic_window(
+            args.from_date, args.to_date, timezone_name
+        )
+    except (ValueError, KeyError) as exc:
+        sys.exit(f"Invalid canonical activity date range/timezone: {exc}")
+
+    client = _load_client()
+    try:
+        history = client.sport_history(
+            "run", start_track_id, stop_track_id, need_sub_data=1
+        )
+        summary_record = _activity_record_by_track_id(history, args.track_id)
+        if summary_record is None:
+            report = {
+                "request_status": "ok",
+                "canonical_activity_created": False,
+                "reason": "track_id_not_found_in_bounded_history_response",
+            }
+        else:
+            source = summary_record.get("source")
+            if not isinstance(source, str) or not source:
+                report = {
+                    "request_status": "ok",
+                    "canonical_activity_created": False,
+                    "reason": "history_record_has_no_usable_source_parameter",
+                    "sport_mapping": _activity_sport_mapping(summary_record),
+                }
+            else:
+                detail = client.sport_detail(args.track_id, source)
+                canonical = canonicalize_activity(
+                    summary_record,
+                    detail,
+                    timezone_name=timezone_name,
+                )
+                report = {
+                    "request_status": "ok",
+                    "canonical_activity_created": True,
+                    "endpoint_contract": {
+                        "history": "/v1/sport/run/history.json",
+                        "detail": "/v1/sport/run/detail.json",
+                    },
+                    "request": {
+                        "from_date": args.from_date,
+                        "to_date": args.to_date,
+                        "timezone": timezone_name,
+                        "track_id": str(args.track_id),
+                    },
+                    "canonical_activity": safe_canonical_activity(canonical),
+                }
+    except requests.RequestException as exc:
+        report = {
+            "request_status": "error",
+            "canonical_activity_created": False,
+            "error": type(exc).__name__,
+        }
+        if exc.response is not None:
+            report["http_status"] = exc.response.status_code
+    report["privacy"] = (
+        "Coordinates, sample values, notes text, source values, credentials, "
+        "headers, cookies, user/device identifiers, URLs, and raw payloads omitted."
+    )
+    _emit_json(report, args)
+
+
+def _activity_failure_category(exc: Exception) -> str:
+    if isinstance(exc, requests.HTTPError) and exc.response is not None:
+        if exc.response.status_code in (401, 403):
+            return "authentication"
+        if exc.response.status_code == 429:
+            return "rate_limit"
+        return "network"
+    if isinstance(exc, requests.RequestException):
+        return "network"
+    if isinstance(exc, sqlite3.DatabaseError):
+        return "database"
+    if isinstance(exc, (ValueError, TypeError, KeyError)):
+        return "payload_or_normalization"
+    return "unknown"
+
+
+def sync_native_activities(
+    client: ZeppClient,
+    database: Database,
+    from_date: str,
+    to_date: str,
+    *,
+    timezone_name: str = FRESHNESS_TIMEZONE,
+    refresh_details: bool = False,
+    max_activities: int = 50,
+) -> dict[str, Any]:
+    """Bounded one-page incremental activity sync with atomic per-activity writes."""
+    if max_activities < 1:
+        raise ValueError("max_activities must be at least 1")
+    start_track_id, stop_track_id = _activity_diagnostic_window(
+        from_date, to_date, timezone_name
+    )
+    database.mark_running_activity_syncs_interrupted()
+    run_id = database.start_activity_sync(from_date, to_date, timezone_name)
+    result: dict[str, Any] = {
+        "status": "running",
+        "database_path": str(database.path),
+        "from_date": from_date,
+        "to_date": to_date,
+        "timezone": timezone_name,
+        "activities_seen": 0,
+        "activities_processed": 0,
+        "inserted": 0,
+        "updated": 0,
+        "unchanged": 0,
+        "detail_fetch_success": 0,
+        "detail_fetch_failed": 0,
+        "detail_fetch_skipped": 0,
+        "history_next": None,
+        "pagination_complete": False,
+        "truncated_by_max_activities": False,
+        "failures": [],
+    }
+    try:
+        history = client.sport_history(
+            "run", start_track_id, stop_track_id, need_sub_data=1
+        )
+        records = _activity_records(history)
+        result["activities_seen"] = len(records)
+        next_cursor = _activity_response_next(history)
+        result["history_next"] = next_cursor
+        result["pagination_complete"] = str(next_cursor) == "-1"
+        ordered = sorted(
+            records,
+            key=lambda record: _activity_number(
+                record.get("trackid", record.get("trackId"))
+            ) or 0,
+            reverse=True,
+        )
+        if len(ordered) > max_activities:
+            result["truncated_by_max_activities"] = True
+            ordered = ordered[:max_activities]
+
+        for history_record in ordered:
+            track_id = history_record.get(
+                "trackid", history_record.get("trackId")
+            )
+            if track_id in (None, ""):
+                result["detail_fetch_failed"] += 1
+                result["failures"].append({
+                    "track_id": None,
+                    "category": "payload_or_normalization",
+                    "error_type": "MissingTrackId",
+                })
+                continue
+            state = database.activity_sync_state(track_id, history_record)
+            if state == "unchanged" and not refresh_details:
+                database.touch_activity(track_id)
+                result["unchanged"] += 1
+                result["detail_fetch_skipped"] += 1
+                result["activities_processed"] += 1
+                continue
+            source = history_record.get("source")
+            if not isinstance(source, str) or not source:
+                result["detail_fetch_failed"] += 1
+                result["failures"].append({
+                    "track_id": str(track_id),
+                    "category": "payload_or_normalization",
+                    "error_type": "MissingSourceParameter",
+                })
+                continue
+            try:
+                detail = client.sport_detail(track_id, source)
+                result["detail_fetch_success"] += 1
+                canonical = canonicalize_activity(
+                    history_record,
+                    detail,
+                    timezone_name=timezone_name,
+                )
+                flags = canonical.get("quality", {}).get("flags", [])
+                if (
+                    "HISTORY_DETAIL_TRACK_ID_MISMATCH" in flags
+                    or "DETAIL_TRACK_ID_MISSING" in flags
+                    or "DETAIL_WRAPPER_UNRECOGNIZED" in flags
+                ):
+                    raise ValueError("detail identity or wrapper validation failed")
+                stored = database.store_canonical_activity(
+                    canonical, history_record, detail
+                )
+                result[stored] += 1
+                result["activities_processed"] += 1
+            except Exception as exc:
+                result["detail_fetch_failed"] += 1
+                result["failures"].append({
+                    "track_id": str(track_id),
+                    "category": _activity_failure_category(exc),
+                    "error_type": type(exc).__name__,
+                })
+
+        incomplete = (
+            result["detail_fetch_failed"] > 0
+            or not result["pagination_complete"]
+            or result["truncated_by_max_activities"]
+        )
+        result["status"] = "partial" if incomplete else "ok"
+        if not result["pagination_complete"]:
+            result["pagination_note"] = (
+                "data.next was not terminal; no guessed cursor traversal performed"
+            )
+    except Exception as exc:
+        result["status"] = "error"
+        result["error_category"] = _activity_failure_category(exc)
+        result["error_type"] = type(exc).__name__
+    finally:
+        database.finish_activity_sync(run_id, result)
+    return result
+
+
+def _activity_sync_dates(args: argparse.Namespace) -> tuple[str, str]:
+    if args.days is not None and (args.from_date or args.to_date):
+        raise ValueError("--days cannot be combined with explicit dates")
+    if bool(args.from_date) != bool(args.to_date):
+        raise ValueError("--from-date and --to-date must be provided together")
+    if args.from_date:
+        start = date.fromisoformat(args.from_date)
+        end = date.fromisoformat(args.to_date)
+        if end < start:
+            raise ValueError("--to-date must not be before --from-date")
+        return start.isoformat(), end.isoformat()
+    days = args.days if args.days is not None else 7
+    if days < 1:
+        raise ValueError("--days must be at least 1")
+    timezone_name = args.timezone or load_config().get("timezone") or FRESHNESS_TIMEZONE
+    today = datetime.now(ZoneInfo(timezone_name)).date()
+    return (today - timedelta(days=days - 1)).isoformat(), today.isoformat()
+
+
+def cmd_sync_activities(args: argparse.Namespace) -> None:
+    lock = SyncLock(args.lock_path) if args.lock_path else None
+    if lock is not None and not lock.acquire(nonblocking=True):
+        _emit_json(
+            {
+                "status": "skipped",
+                "reason": "lock_held",
+                "lock_path": str(args.lock_path),
+            },
+            args,
+        )
+        return
+    try:
+        try:
+            from_date, to_date = _activity_sync_dates(args)
+            timezone_name = (
+                args.timezone
+                or load_config().get("timezone")
+                or FRESHNESS_TIMEZONE
+            )
+            database = Database(_db_path_from_args(args))
+            try:
+                result = sync_native_activities(
+                    _load_client(),
+                    database,
+                    from_date,
+                    to_date,
+                    timezone_name=timezone_name,
+                    refresh_details=args.refresh_details,
+                    max_activities=args.max_activities,
+                )
+            finally:
+                database.close()
+        except (ValueError, KeyError) as exc:
+            raise SystemExit(f"Invalid activity sync options: {exc}") from None
+    finally:
+        if lock is not None:
+            lock.release()
+    _emit_json(result, args)
+    if result["status"] == "error":
+        raise SystemExit(2)
+
+
+def cmd_activity_status(args: argparse.Namespace) -> None:
+    database = Database(_db_path_from_args(args))
+    try:
+        result = database.activity_status()
+    finally:
+        database.close()
+    _emit_json(result, args)
+
+
+def cmd_inspect_activity(args: argparse.Namespace) -> None:
+    database = Database(_db_path_from_args(args))
+    try:
+        result = database.inspect_activity(
+            args.track_id, include_notes=args.include_notes
+        )
+    finally:
+        database.close()
+    if result is None:
+        raise SystemExit("Activity not found")
+    _emit_json(result, args)
 
 
 def cmd_diagnose_sport_coverage(args: argparse.Namespace) -> None:
@@ -4375,6 +5584,24 @@ def main() -> None:
     sp.set_defaults(func=cmd_diagnose_activity_detail)
 
     sp = sub.add_parser(
+        "diagnose-canonical-activity",
+        help="Build one privacy-safe canonical history/detail activity",
+    )
+    _add_json(sp)
+    sp.add_argument("--from-date", required=True, help="First local date YYYY-MM-DD")
+    sp.add_argument("--to-date", required=True, help="Last local date YYYY-MM-DD")
+    sp.add_argument(
+        "--timezone",
+        help="IANA timezone for local bounds (default config or Europe/Ljubljana)",
+    )
+    sp.add_argument(
+        "--track-id",
+        required=True,
+        help="Exact activity trackid; source is discovered but never printed",
+    )
+    sp.set_defaults(func=cmd_diagnose_canonical_activity)
+
+    sp = sub.add_parser(
         "diagnose-sport-coverage",
         help="Bounded privacy-safe inventory of activity types from run history",
     )
@@ -4497,6 +5724,62 @@ def main() -> None:
     sp.add_argument("--limit", type=int, default=2000)
     sp.add_argument("--lock-path", help="Advisory lock path for unattended synchronization")
     sp.set_defaults(func=cmd_sync_db)
+
+    sp = sub.add_parser(
+        "sync-activities",
+        help="Incrementally persist bounded native Zepp history/detail activities",
+    )
+    _add_json(sp)
+    _add_db(sp)
+    sp.add_argument(
+        "--days",
+        type=int,
+        help="Inclusive local-day window ending today (default 7)",
+    )
+    sp.add_argument("--from-date", help="First local date YYYY-MM-DD")
+    sp.add_argument("--to-date", help="Last local date YYYY-MM-DD")
+    sp.add_argument(
+        "--timezone",
+        help="IANA timezone for request bounds (default config or Europe/Ljubljana)",
+    )
+    sp.add_argument(
+        "--max-activities",
+        type=int,
+        default=50,
+        help="Hard per-run activity limit (default 50)",
+    )
+    sp.add_argument(
+        "--refresh-details",
+        action="store_true",
+        help="Refetch detail even when the stored history summary is unchanged",
+    )
+    sp.add_argument(
+        "--lock-path",
+        help="Optional advisory lock path for unattended activity synchronization",
+    )
+    sp.set_defaults(func=cmd_sync_activities)
+
+    sp = sub.add_parser(
+        "activity-status",
+        help="Privacy-safe native activity database and sync status",
+    )
+    _add_json(sp)
+    _add_db(sp)
+    sp.set_defaults(func=cmd_activity_status)
+
+    sp = sub.add_parser(
+        "inspect-activity",
+        help="Inspect one stored activity without coordinates or raw samples",
+    )
+    _add_json(sp)
+    _add_db(sp)
+    sp.add_argument("--track-id", required=True)
+    sp.add_argument(
+        "--include-notes",
+        action="store_true",
+        help="Explicitly include locally stored Workout Notes text",
+    )
+    sp.set_defaults(func=cmd_inspect_activity)
 
     sp = sub.add_parser("backfill", help="Resumable backwards historical synchronization")
     sp.add_argument("--days", type=int, required=True, help="Historical calendar days to request")

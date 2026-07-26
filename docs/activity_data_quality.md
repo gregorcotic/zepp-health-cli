@@ -569,6 +569,20 @@ transformations such as delta accumulation and altitude `/100` scaling are not
 automatically production-proven. No detail-derived metric may overwrite a
 history summary until current production values and sport semantics agree.
 
+Z001.10 formalizes this boundary in `canonicalize_activity()`. History
+summary metrics and native detail streams retain separate provenance;
+`derived_elevation_gain_m` is deliberately empty until an evidence-based
+validator exists. The canonical statuses distinguish `SENTINEL_UNAVAILABLE`
+from `INVALID` and optional `SUPPORTED_BUT_NOT_RECORDED` sensors from quality
+failures. Open Water Swim altitude `-2000000` is production-proven unavailable
+and is rejected before scaling. See `docs/canonical_activity_model.md`.
+
+Z001.11 persists raw-vs-normalized separation relationally. Quality flags are
+queryable rows, not destructive rewrites. Ojstrica summary ascent and native
+altitude/GPS remain separately retrievable for later validation. A stored
+`POWER_SENSOR_NOT_RECORDED` remains factual optional-sensor evidence and does
+not become an activity-quality error.
+
 ### Safe deterministic sub-data comparison
 
 `diagnose-activities --compare-sub-data --track-id ...` performs exactly two
