@@ -630,3 +630,82 @@ quality layer will preserve raw values, attach independent evidence, select a
 value only under a proven rule, and expose factual status/confidence/reason.
 Strava is optional validation/enrichment and its absence cannot block Zepp
 ingestion. C017 remains paused.
+
+## Z001.5 Ojstrica track/elevation forensics
+
+Production identifies the July 25 Ojstrica Hike as `trackid=1784948221`,
+fixture-backed `type=22`. The `/run/history.json` response contains rich
+summary distance, duration, HR, training, and paired elevation fields, but
+`need_sub_data=1` returned no detected GPS, altitude, or workout-HR samples.
+
+The paired elevation fields strongly support `/100` scaling for long-form
+values on this fixture, yielding ascent 1915.44 m, descent 1880.21 m, minimum
+786.81 m, maximum 2329.29 m, and average 1651.95 m. This is not yet declared a
+global conversion.
+
+Ojstrica is now a multi-source processing fixture, not an example of invalid
+Zepp elevation. Zepp and an independent Garmin recording agree within about
+1.9 m at maximum altitude and 4.0 m at minimum altitude, while ascent totals
+vary across Zepp summary, Strava summary, two exported GPX analyses, devices,
+and sample densities. Naive positive-delta GPX ascent is not authoritative.
+
+No verified Zepp cloud track/detail endpoint was found in current/upstream
+source, history, branches, issues, or public code. Do not probe guessed URLs.
+Capture sanitized app network traffic while opening detail/map/chart/share
+screens. The new `--compare-sub-data` mode safely automates the two proven
+history requests and structural diff for one exact track.
+
+Source references: `ZeppClient.sport_history` is the only activity-history
+method and originates in upstream commit `a466dfa`; `cmd_diagnose_activities`
+calls it with date-derived `startTrackId`/`stopTrackId`. No other `ZeppClient`
+method accepts an activity `trackid` or `parent_trackid`. The second-HR file
+manifest, generic events, band data, and insight `trackId` fields belong to
+different contracts and are not activity-detail evidence.
+
+Exact read-only Ubuntu commands:
+
+```bash
+cd /opt/zepp-health-cli
+source .venv/bin/activate
+
+# A: summary request without sub-data
+python3 zepp_health.py diagnose-activities \
+  --from-date 2026-07-25 --to-date 2026-07-25 \
+  --timezone Europe/Ljubljana \
+  --sport run --track-id 1784948221 \
+  --limit 1 --need-sub-data 0 --json
+
+# B/C: exact Ojstrica request with sub-data
+python3 zepp_health.py diagnose-activities \
+  --from-date 2026-07-25 --to-date 2026-07-25 \
+  --timezone Europe/Ljubljana \
+  --sport run --track-id 1784948221 \
+  --limit 1 --need-sub-data 1 --json
+
+# Deterministic field/type/safe-value comparison
+python3 zepp_health.py diagnose-activities \
+  --from-date 2026-07-25 --to-date 2026-07-25 \
+  --timezone Europe/Ljubljana \
+  --sport run --track-id 1784948221 \
+  --limit 1 --compare-sub-data --json
+```
+
+There is no command D because no track-detail endpoint is verified. The safe
+next step is an HTTPS proxy capture on the operator's own account while the app
+opens the Ojstrica map, elevation/HR charts, and export/share screens; sanitize
+path/query/response structure before reporting it.
+
+For one normal Hike control, first use a narrow known date and discover its ID:
+
+```bash
+python3 zepp_health.py diagnose-activities \
+  --from-date NORMAL_HIKE_DATE --to-date NORMAL_HIKE_DATE \
+  --timezone Europe/Ljubljana \
+  --sport run --limit 20 --need-sub-data 1 --json
+
+python3 zepp_health.py diagnose-activities \
+  --from-date NORMAL_HIKE_DATE --to-date NORMAL_HIKE_DATE \
+  --timezone Europe/Ljubljana \
+  --sport run --track-id NORMAL_HIKE_TRACKID \
+  --limit 1 --compare-sub-data --json
+```

@@ -827,7 +827,9 @@ def _activity_gps_track_evidence(record: dict[str, Any]) -> dict[str, Any]:
         "gps_point_count": point_count,
         "track_field_names": sorted(track_fields),
         "track_time_coverage": time_coverage,
+        "altitude_stream_present": altitude_sample_count > 0,
         "altitude_sample_count": altitude_sample_count,
+        "workout_hr_stream_present": hr_sample_count > 0,
         "workout_hr_sample_count": hr_sample_count,
     }
 
@@ -959,6 +961,144 @@ def diagnose_activity_payload(
     }
 
 
+def _activity_record_by_track_id(
+    data: Any, track_id: str | int
+) -> dict[str, Any] | None:
+    wanted = str(track_id)
+    return next(
+        (
+            record
+            for record in _activity_records(data)
+            if str(
+                record.get(
+                    "trackid",
+                    record.get("trackId", record.get("track_id", "")),
+                )
+            ) == wanted
+        ),
+        None,
+    )
+
+
+def _activity_structure_paths(
+    value: Any, *, path: str = "$", depth: int = 0
+) -> dict[str, str]:
+    value_type = (
+        "list"
+        if isinstance(value, list)
+        else "object"
+        if isinstance(value, dict)
+        else type(value).__name__
+    )
+    paths = {path: value_type}
+    if depth >= 4:
+        return paths
+    if isinstance(value, dict):
+        for raw_key, item in value.items():
+            key = str(raw_key)
+            if _activity_sensitive_key(key):
+                continue
+            paths.update(
+                _activity_structure_paths(
+                    item, path=f"{path}.{key}", depth=depth + 1
+                )
+            )
+    elif isinstance(value, list) and value:
+        paths.update(
+            _activity_structure_paths(
+                value[0], path=f"{path}[]", depth=depth + 1
+            )
+        )
+    return paths
+
+
+def _activity_safe_leaf_values(value: Any, *, path: str = "$") -> dict[str, Any]:
+    leaves: dict[str, Any] = {}
+    if isinstance(value, dict):
+        for key, item in value.items():
+            leaves.update(
+                _activity_safe_leaf_values(item, path=f"{path}.{key}")
+            )
+    elif isinstance(value, list):
+        for index, item in enumerate(value[:3]):
+            leaves.update(
+                _activity_safe_leaf_values(item, path=f"{path}[{index}]")
+            )
+    elif isinstance(value, (int, float, bool)) or value is None:
+        leaves[path] = value
+    return leaves
+
+
+def compare_activity_sub_data_payloads(
+    without_sub_data: Any,
+    with_sub_data: Any,
+    *,
+    sport_segment: str,
+    track_id: str | int,
+) -> dict[str, Any]:
+    """Compare one activity structurally without exposing text or coordinates."""
+    before_record = _activity_record_by_track_id(without_sub_data, track_id)
+    after_record = _activity_record_by_track_id(with_sub_data, track_id)
+    before_diagnostic = diagnose_activity_payload(
+        without_sub_data,
+        sport_segment=sport_segment,
+        limit=1,
+        include_text=False,
+        track_id=track_id,
+    )
+    after_diagnostic = diagnose_activity_payload(
+        with_sub_data,
+        sport_segment=sport_segment,
+        limit=1,
+        include_text=False,
+        track_id=track_id,
+    )
+    before_paths = (
+        _activity_structure_paths(before_record) if before_record is not None else {}
+    )
+    after_paths = (
+        _activity_structure_paths(after_record) if after_record is not None else {}
+    )
+    before_summary = (
+        before_diagnostic["records"][0] if before_diagnostic["records"] else {}
+    )
+    after_summary = (
+        after_diagnostic["records"][0] if after_diagnostic["records"] else {}
+    )
+    before_values = _activity_safe_leaf_values(before_summary)
+    after_values = _activity_safe_leaf_values(after_summary)
+    common_paths = sorted(before_paths.keys() & after_paths.keys())
+    common_values = sorted(before_values.keys() & after_values.keys())
+    return {
+        "sport_segment": sport_segment,
+        "track_id": str(track_id),
+        "without_sub_data": before_diagnostic,
+        "with_sub_data": after_diagnostic,
+        "diff": {
+            "structure_paths_added": sorted(after_paths.keys() - before_paths.keys()),
+            "structure_paths_removed": sorted(before_paths.keys() - after_paths.keys()),
+            "structure_types_changed": [
+                {
+                    "path": path,
+                    "without": before_paths[path],
+                    "with": after_paths[path],
+                }
+                for path in common_paths
+                if before_paths[path] != after_paths[path]
+            ],
+            "safe_values_changed": [
+                {
+                    "path": path,
+                    "without": before_values[path],
+                    "with": after_values[path],
+                }
+                for path in common_values
+                if before_values[path] != after_values[path]
+            ],
+        },
+    }
+
+
 def _activity_diagnostic_window(
     from_date: str, to_date: str, timezone_name: str
 ) -> tuple[int, int]:
@@ -977,6 +1117,8 @@ def _activity_diagnostic_window(
 def cmd_diagnose_activities(args: argparse.Namespace) -> None:
     if args.limit < 1:
         sys.exit("--limit must be at least 1")
+    if args.compare_sub_data and not args.track_id:
+        sys.exit("--compare-sub-data requires --track-id")
     timezone_name = args.timezone or load_config().get("timezone") or FRESHNESS_TIMEZONE
     try:
         start_track_id, stop_track_id = _activity_diagnostic_window(
@@ -988,19 +1130,33 @@ def cmd_diagnose_activities(args: argparse.Namespace) -> None:
     sports: list[dict[str, Any]] = []
     for sport in args.sport:
         try:
-            payload = client.sport_history(
-                sport,
-                start_track_id,
-                stop_track_id,
-                need_sub_data=args.need_sub_data,
-            )
-            result = diagnose_activity_payload(
-                payload,
-                sport_segment=sport,
-                limit=args.limit,
-                include_text=args.include_text,
-                track_id=args.track_id,
-            )
+            if args.compare_sub_data:
+                without_sub_data = client.sport_history(
+                    sport, start_track_id, stop_track_id, need_sub_data=0
+                )
+                with_sub_data = client.sport_history(
+                    sport, start_track_id, stop_track_id, need_sub_data=1
+                )
+                result = compare_activity_sub_data_payloads(
+                    without_sub_data,
+                    with_sub_data,
+                    sport_segment=sport,
+                    track_id=args.track_id,
+                )
+            else:
+                payload = client.sport_history(
+                    sport,
+                    start_track_id,
+                    stop_track_id,
+                    need_sub_data=args.need_sub_data,
+                )
+                result = diagnose_activity_payload(
+                    payload,
+                    sport_segment=sport,
+                    limit=args.limit,
+                    include_text=args.include_text,
+                    track_id=args.track_id,
+                )
             result["request_status"] = "ok"
         except requests.RequestException as exc:
             result = {
@@ -1027,7 +1183,8 @@ def cmd_diagnose_activities(args: argparse.Namespace) -> None:
             "timezone": timezone_name,
             "startTrackId": start_track_id,
             "stopTrackId": stop_track_id,
-            "need_sub_data": args.need_sub_data,
+            "need_sub_data": [0, 1] if args.compare_sub_data else args.need_sub_data,
+            "compare_sub_data": args.compare_sub_data,
             "output_record_limit_per_sport": args.limit,
             "track_id_filter": args.track_id,
         },
@@ -2927,6 +3084,14 @@ def main() -> None:
         choices=(0, 1),
         default=1,
         help="Request Zepp sub-data (default 1)",
+    )
+    sp.add_argument(
+        "--compare-sub-data",
+        action="store_true",
+        help=(
+            "Request need_sub_data=0 and 1 and compare one --track-id safely; "
+            "--include-text is ignored"
+        ),
     )
     sp.add_argument(
         "--include-text",

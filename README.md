@@ -85,6 +85,12 @@ python3 zepp_health.py diagnose-activities \
   --timezone Europe/Ljubljana \
   --sport run --sport walking --limit 20 --json
 
+# Safe structural comparison for one activity with/without sub-data
+python3 zepp_health.py diagnose-activities \
+  --from-date 2026-07-25 --to-date 2026-07-25 \
+  --timezone Europe/Ljubljana --sport run \
+  --track-id TRACKID --compare-sub-data --json
+
 # Sleep / steps / band payload (large JSON; often base64-encoded blobs)
 python3 zepp_health.py band-data --days 14
 python3 zepp_health.py band-data --from-date 2026-04-01 --to-date 2026-04-18

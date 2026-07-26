@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 from zepp_health import (
     ZeppClient,
     _activity_diagnostic_window,
+    compare_activity_sub_data_payloads,
     diagnose_activity_payload,
 )
 
@@ -273,7 +274,9 @@ class ActivityDiagnosticTests(unittest.TestCase):
         self.assertEqual(len(report["records"]), 1)
         record = report["records"][0]
         self.assertEqual(record["gps_point_count"], 2)
+        self.assertTrue(record["altitude_stream_present"])
         self.assertEqual(record["altitude_sample_count"], 2)
+        self.assertTrue(record["workout_hr_stream_present"])
         self.assertEqual(record["workout_hr_sample_count"], 2)
         self.assertEqual(
             record["track_time_coverage"],
@@ -306,6 +309,48 @@ class ActivityDiagnosticTests(unittest.TestCase):
                 "type": "",
             },
         )
+
+    def test_sub_data_diff_is_structural_and_coordinate_safe(self) -> None:
+        without_sub_data = {
+            "data": {
+                "summary": [{
+                    "trackid": 42,
+                    "exercise_load": 10,
+                    "sport_title": "Private hike",
+                }]
+            }
+        }
+        with_sub_data = {
+            "data": {
+                "summary": [{
+                    "trackid": 42,
+                    "exercise_load": 11,
+                    "sport_title": "Private hike",
+                    "child_list": [{"lap": 1, "note": "Private detail"}],
+                    "route": [{
+                        "timestamp": 1000,
+                        "latitude": 46.1,
+                        "longitude": 14.2,
+                        "altitude": 900,
+                        "heartRate": 120,
+                    }],
+                }]
+            }
+        }
+        report = compare_activity_sub_data_payloads(
+            without_sub_data,
+            with_sub_data,
+            sport_segment="run",
+            track_id=42,
+        )
+        self.assertIn("$.child_list", report["diff"]["structure_paths_added"])
+        self.assertIn("$.route", report["diff"]["structure_paths_added"])
+        self.assertTrue(report["diff"]["safe_values_changed"])
+        rendered = json.dumps(report)
+        self.assertNotIn("Private hike", rendered)
+        self.assertNotIn("Private detail", rendered)
+        self.assertNotIn("46.1", rendered)
+        self.assertNotIn("14.2", rendered)
 
 
 if __name__ == "__main__":

@@ -231,3 +231,29 @@ statuses/confidence, optional Zepp–Strava matching, the future coach contract,
 and the intended public Zepp-native platform. Ojstrica remains the mandatory
 Z001.4/Z001.5 anomaly fixture. C017 remains paused; no downstream, production,
 Strava, Garmin, or repository-structure change was made.
+
+## Z001.5 — Ojstrica native-track and elevation forensics
+
+Reclassified the July 25 Ojstrica Hike (`trackid=1784948221`, fixture-backed
+`type=22`) as a multi-source elevation-processing fixture. Zepp's paired
+summary fields support `/100` scaling on this record: 1915.44 m ascent,
+1880.21 m descent, 786.81–2329.29 m range. An independent Garmin recording
+agrees within roughly 1.9 m at the maximum and 4.0 m at the minimum, while
+different summary/export/device algorithms yield materially different ascent
+totals. No source is declared ground truth and naive GPX positive-delta ascent
+is explicitly rejected as an automatic replacement.
+
+Deep repository, upstream, history, branch, issue, and public-code searches
+found no verified Zepp cloud track/detail endpoint. The proven
+`/run/history.json` response with `need_sub_data=1` still exposed no detected
+GPS, altitude, or workout-HR samples. Added a sanitized deterministic
+`--compare-sub-data` mode that performs the two proven history requests for one
+track and reports structural/type/safe-value differences without text,
+coordinates, identifiers, or unrelated records.
+
+Expanded provenance classes to distinguish native summaries/tracks,
+third-party summaries/exports, independent-device tracks, and route
+references. Ojstrica's current flags are source disagreement plus strong
+absolute-altitude agreement and pending native-track validation—not invalid
+Zepp elevation. C017 remains paused and no downstream, Garmin, production, or
+repository restructuring occurred.
