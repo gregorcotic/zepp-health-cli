@@ -771,10 +771,14 @@ def _activity_safe_nested(
 
 def _activity_gps_track_evidence(record: dict[str, Any]) -> dict[str, Any]:
     point_count = 0
+    altitude_sample_count = 0
+    hr_sample_count = 0
     track_fields: set[str] = set()
+    timestamp_fields: set[str] = set()
+    timestamp_values: list[int | float | str] = []
 
     def inspect(value: Any, *, parent_key: str = "", depth: int = 0) -> None:
-        nonlocal point_count
+        nonlocal point_count, altitude_sample_count, hr_sample_count
         if depth > 4 or parent_key.lower() == "location":
             return
         if isinstance(value, list):
@@ -786,6 +790,19 @@ def _activity_gps_track_evidence(record: dict[str, Any]) -> dict[str, Any]:
                     if has_lat and has_lon:
                         point_count += 1
                         track_fields.update(str(key) for key in item)
+                        if lower_fields & {"altitude", "alt", "elevation"}:
+                            altitude_sample_count += 1
+                        if lower_fields & {
+                            "hr", "heart_rate", "heartrate", "heart-rate",
+                        }:
+                            hr_sample_count += 1
+                        for raw_key, raw_value in item.items():
+                            lower_key = str(raw_key).lower()
+                            if lower_key in {
+                                "timestamp", "time", "ts", "datetime", "date_time",
+                            } and isinstance(raw_value, (int, float, str)):
+                                timestamp_fields.add(str(raw_key))
+                                timestamp_values.append(raw_value)
                     else:
                         inspect(item, parent_key=parent_key, depth=depth + 1)
         elif isinstance(value, dict):
@@ -793,10 +810,25 @@ def _activity_gps_track_evidence(record: dict[str, Any]) -> dict[str, Any]:
                 inspect(item, parent_key=str(key), depth=depth + 1)
 
     inspect(record)
+    time_coverage: dict[str, Any] = {
+        "timestamp_field_names": sorted(timestamp_fields),
+        "sample_count_with_timestamp": len(timestamp_values),
+    }
+    if timestamp_values and all(
+        isinstance(value, (int, float)) for value in timestamp_values
+    ):
+        time_coverage["raw_start"] = min(timestamp_values)
+        time_coverage["raw_end"] = max(timestamp_values)
+    elif timestamp_values and all(isinstance(value, str) for value in timestamp_values):
+        time_coverage["raw_start"] = min(timestamp_values)
+        time_coverage["raw_end"] = max(timestamp_values)
     return {
         "gps_track_present": point_count > 0,
         "gps_point_count": point_count,
         "track_field_names": sorted(track_fields),
+        "track_time_coverage": time_coverage,
+        "altitude_sample_count": altitude_sample_count,
+        "workout_hr_sample_count": hr_sample_count,
     }
 
 
@@ -880,10 +912,24 @@ def diagnose_activity_payload(
     sport_segment: str,
     limit: int = 20,
     include_text: bool = False,
+    track_id: str | int | None = None,
 ) -> dict[str, Any]:
     if limit < 1:
         raise ValueError("activity diagnostic limit must be at least 1")
     records = _activity_records(data)
+    selected_records = records
+    if track_id is not None:
+        wanted = str(track_id)
+        selected_records = [
+            record
+            for record in records
+            if str(
+                record.get(
+                    "trackid",
+                    record.get("trackId", record.get("track_id", "")),
+                )
+            ) == wanted
+        ]
     response_metadata: dict[str, Any] = {}
     if isinstance(data, dict):
         if "code" in data and (
@@ -901,12 +947,14 @@ def diagnose_activity_payload(
     return {
         "sport_segment": sport_segment,
         "raw_record_count": len(records),
-        "reported_record_count": min(len(records), limit),
+        "track_id_filter": str(track_id) if track_id is not None else None,
+        "matched_record_count": len(selected_records),
+        "reported_record_count": min(len(selected_records), limit),
         "response_metadata": response_metadata,
         "response_structure": _activity_shape(data),
         "records": [
             _activity_summary(record, include_text=include_text)
-            for record in records[:limit]
+            for record in selected_records[:limit]
         ],
     }
 
@@ -951,6 +999,7 @@ def cmd_diagnose_activities(args: argparse.Namespace) -> None:
                 sport_segment=sport,
                 limit=args.limit,
                 include_text=args.include_text,
+                track_id=args.track_id,
             )
             result["request_status"] = "ok"
         except requests.RequestException as exc:
@@ -980,6 +1029,7 @@ def cmd_diagnose_activities(args: argparse.Namespace) -> None:
             "stopTrackId": stop_track_id,
             "need_sub_data": args.need_sub_data,
             "output_record_limit_per_sport": args.limit,
+            "track_id_filter": args.track_id,
         },
         "privacy": (
             "Credentials, user/device identifiers, secret URLs, and coordinate "
@@ -2866,6 +2916,10 @@ def main() -> None:
         type=int,
         default=20,
         help="Maximum records reported per sport; this is not a server query parameter",
+    )
+    sp.add_argument(
+        "--track-id",
+        help="Report only the exact trackid/trackId value (filter applied locally)",
     )
     sp.add_argument(
         "--need-sub-data",

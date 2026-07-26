@@ -186,3 +186,27 @@ exertion, and the known manual notes. A one-day Hike capture through the
 already proven `/run/` route is the next outdoor capability gate. C017 remains
 paused because the outcome can materially change future repository and service
 boundaries; no downstream or Strava behavior changed.
+
+## Z001.3 — Track-specific production-probe preparation
+
+Added a local-only `--track-id` diagnostic filter so explicitly authorized text
+inspection is limited to one activity even when Zepp returns several records.
+Added factual outdoor stream metadata: coordinate-bearing GPS point count,
+field names, raw timestamp coverage, altitude-sample count, and workout-HR
+sample count. Coordinates remain suppressed and `location` remains metadata,
+not GPS evidence.
+
+Prepared exact paired Cross-training probes, a bounded Ojstrica discovery and
+one-track follow-up, and a small pagination probe. `data.next=-1` is recorded
+only as an observed terminal candidate; cursor direction and reuse remain
+unproven and no pagination loop was added. Ojstrica is designated as a future
+Z001.4 quality fixture for comparing raw summary elevation with track-derived
+validation without overwriting either.
+
+Drafted the future source-trust and canonical-activity direction: Zepp native
+facts remain authoritative candidates, while Strava may be optional validation
+or enrichment. The long-term public repository must separate proven contracts,
+observed behavior, candidate mappings, and unknowns while excluding secrets,
+private notes, personal activities, user IDs, and GPS coordinates. No
+production output accompanied Z001.3, so RPE/TE/notes/sub-data and outdoor
+capabilities remain pending rather than inferred. C017 stays paused.

@@ -84,6 +84,7 @@ class ActivityDiagnosticTests(unittest.TestCase):
             payload, sport_segment="walking", limit=2
         )
         self.assertEqual(report["raw_record_count"], 5)
+        self.assertEqual(report["matched_record_count"], 5)
         self.assertEqual(report["reported_record_count"], 2)
         self.assertEqual(len(report["records"]), 2)
         with self.assertRaises(ValueError):
@@ -229,6 +230,65 @@ class ActivityDiagnosticTests(unittest.TestCase):
         self.assertFalse(record["gps_track_present"])
         self.assertEqual(record["gps_point_count"], 0)
         self.assertNotIn("46.1", json.dumps(record))
+
+    def test_track_filter_prevents_unrelated_text_and_reports_outdoor_streams(self) -> None:
+        payload = {
+            "data": {
+                "summary": [
+                    {"trackid": 1, "sport_title": "Unrelated private title"},
+                    {
+                        "trackid": 1784739852,
+                        "sport_title": "Ojstrica",
+                        "route": [
+                            {
+                                "timestamp": 1000,
+                                "latitude": 46.1,
+                                "longitude": 14.2,
+                                "altitude": 700,
+                                "heartRate": 120,
+                                "speed": 2.1,
+                            },
+                            {
+                                "timestamp": 2000,
+                                "latitude": 46.2,
+                                "longitude": 14.3,
+                                "altitude": 900,
+                                "heartRate": 135,
+                                "speed": 1.8,
+                            },
+                        ],
+                    },
+                ]
+            }
+        }
+        report = diagnose_activity_payload(
+            payload,
+            sport_segment="run",
+            track_id="1784739852",
+            include_text=True,
+        )
+        self.assertEqual(report["raw_record_count"], 2)
+        self.assertEqual(report["matched_record_count"], 1)
+        self.assertEqual(report["track_id_filter"], "1784739852")
+        self.assertEqual(len(report["records"]), 1)
+        record = report["records"][0]
+        self.assertEqual(record["gps_point_count"], 2)
+        self.assertEqual(record["altitude_sample_count"], 2)
+        self.assertEqual(record["workout_hr_sample_count"], 2)
+        self.assertEqual(
+            record["track_time_coverage"],
+            {
+                "timestamp_field_names": ["timestamp"],
+                "sample_count_with_timestamp": 2,
+                "raw_start": 1000,
+                "raw_end": 2000,
+            },
+        )
+        rendered = json.dumps(report)
+        self.assertIn("Ojstrica", rendered)
+        self.assertNotIn("Unrelated private title", rendered)
+        self.assertNotIn("46.1", rendered)
+        self.assertNotIn("14.2", rendered)
 
     def test_sport_history_passes_need_sub_data_without_changing_contract(self) -> None:
         client = ZeppClient("private-token", "private-user", "example.invalid")

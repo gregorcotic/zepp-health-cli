@@ -446,3 +446,168 @@ restructure should precede the Z001 decision. A future Garmin coach should
 likewise prefer independently proven Garmin-native health and activity data
 over a mandatory Strava dependency; Garmin parity is not assumed or part of
 this implementation.
+
+## Z001.3 production probes and source-trust gate
+
+Z001.3 requires operator-provided production output. No `need_sub_data=0/1`
+JSON or Ojstrica JSON was supplied with the task, so RPE, aerobic TE, Workout
+Balance, strength/exertion values, Workout Notes, and outdoor stream capability
+remain evidence-gated. App values are comparison targets, not substituted API
+facts.
+
+The diagnostic now accepts an exact local filter:
+
+```text
+--track-id TRACKID
+```
+
+The filter is not sent to Zepp; the API request contract is unchanged. It is
+applied before text rendering, so `--include-text` cannot expose unrelated
+activities returned in the same response. Output distinguishes the total API
+count from `matched_record_count`.
+
+For actual coordinate-bearing sample lists, the report now adds:
+
+```text
+gps_track_present
+gps_point_count
+track_field_names
+track_time_coverage.timestamp_field_names
+track_time_coverage.sample_count_with_timestamp
+track_time_coverage.raw_start
+track_time_coverage.raw_end
+altitude_sample_count
+workout_hr_sample_count
+```
+
+Time boundaries remain in the raw vendor representation because the unit and
+timezone of an unobserved track timestamp must not be guessed. Coordinate
+values remain suppressed. `location_metadata` is reported independently and
+never creates track evidence.
+
+### Cross-training comparison commands
+
+Run exactly the same date and track in both modes:
+
+```bash
+python3 zepp_health.py diagnose-activities \
+  --from-date 2026-07-22 --to-date 2026-07-22 \
+  --timezone Europe/Ljubljana \
+  --sport run --track-id 1784739852 \
+  --limit 1 --need-sub-data 0 --include-text --json
+
+python3 zepp_health.py diagnose-activities \
+  --from-date 2026-07-22 --to-date 2026-07-22 \
+  --timezone Europe/Ljubljana \
+  --sport run --track-id 1784739852 \
+  --limit 1 --need-sub-data 1 --include-text --json
+```
+
+Compare `field_names`, `coaching_fields`, `nested_structures`, and all stream
+evidence fields. Search the single matched output for `Evening Crossfit`,
+`DEADLIFT`, `162.5`, `PRESS`, and `65`. If none occur in either mode, the
+observed history/sub-data path does not expose the known Workout Notes. That
+does not prove that no undiscovered Zepp endpoint can expose them.
+
+### Ojstrica discovery and exact follow-up
+
+The exact Zepp date/track ID is not in repository evidence. Do not guess it.
+Use a read-only two-week discovery window without private text:
+
+```bash
+python3 zepp_health.py diagnose-activities \
+  --from-date 2026-07-13 --to-date 2026-07-26 \
+  --timezone Europe/Ljubljana \
+  --sport run --limit 50 --need-sub-data 1 --json
+```
+
+If Ojstrica is outside that period, shift the same 14-day window rather than
+expanding into a broad history pull. Match using local start, duration,
+distance, HR, calories, and type—not title alone. Then rerun exactly one day
+and one discovered ID:
+
+```bash
+python3 zepp_health.py diagnose-activities \
+  --from-date OJSTRICA_DATE --to-date OJSTRICA_DATE \
+  --timezone Europe/Ljubljana \
+  --sport run --track-id OJSTRICA_TRACKID \
+  --limit 1 --need-sub-data 1 --include-text --json
+```
+
+Capture all native elevation summary fields unchanged:
+`elevationGain`, `elevationLoss`, `altitude_ascend`, `altitude_descend`,
+`max_altitude`, `min_altitude`, and `avg_altitude`. A positive
+`altitude_sample_count` makes later track-derived validation technically
+possible; Z001.3 does not calculate or overwrite elevation.
+
+Ojstrica is a mandatory future Z001.4 regression fixture. The validator should
+compare summary elevation with a separately derived track result, attach a
+quality flag when they differ materially, and preserve both raw values.
+
+### History/pagination probe
+
+`data.next` exists and `-1` has been observed as a terminal candidate. The
+current client makes one request and does not paginate. A terminal `-1`
+response cannot prove how a nonterminal cursor should be applied.
+
+Use this small multi-record window:
+
+```bash
+python3 zepp_health.py diagnose-activities \
+  --from-date 2026-07-20 --to-date 2026-07-26 \
+  --timezone Europe/Ljubljana \
+  --sport run --limit 50 --need-sub-data 0 --json
+```
+
+If `response_metadata.next` is not `-1`, preserve the sanitized output for a
+separate cursor-characterization task. Do not feed it into `startTrackId` or
+`stopTrackId` speculatively and do not implement a history loop until the
+direction, inclusivity, duplication, and termination behavior are proven.
+
+### Draft factual source-trust model
+
+| Metric | Native source | Validation source | Initial confidence | Known quality issue |
+|---|---|---|---|---|
+| identity | Zepp `trackid` | repeated Zepp capture; optional Strava match | medium | long-term/update stability pending |
+| sport | Zepp `type`/`sport_mode` | Zepp app; optional Strava | medium per fixture | global enum incomplete |
+| duration | Zepp summary | app; optional Strava | high for Cross-training | moving/elapsed meanings pending |
+| distance | Zepp summary | Zepp GPS track; optional Strava | pending outdoor | units and GPS validation pending |
+| HR summary | Zepp summary | Zepp workout HR stream; optional Strava | high for Cross-training | stream pending |
+| calories | Zepp summary | app; optional Strava | high for Cross-training | vendor algorithm |
+| training load/effect/RPE | Zepp summary | Zepp app | load high; others pending | raw values pending |
+| strength/exertion | Zepp summary/sub-data | Zepp app/notes | pending | structures pending |
+| title/notes | Zepp summary/sub-data | Zepp app; optional Strava enrichment | pending | known summary title/content empty |
+| GPS track | Zepp sub-data/detail | optional Strava track | pending | no production sample yet |
+| elevation | Zepp summary | Zepp altitude samples; optional Strava | pending | Ojstrica anomaly |
+
+A future canonical Zepp activity should contain:
+
+```text
+source_activity_id
+sport
+start_time
+duration
+distance
+elevation
+heart_rate
+calories
+training_load
+training_effect
+rpe
+strength_metrics
+gps_availability
+quality_flags
+source_raw_metrics
+```
+
+Strava can attach as optional validation/enrichment; it must not overwrite raw
+Zepp metrics silently. This is a design draft, not an implementation.
+
+The intended public/open-source project must keep credentials, user IDs,
+private notes, raw personal activities, and GPS coordinates out of commits and
+examples. Documentation must label API contracts as proven, production
+behavior as observed, mappings as fixture-backed or candidate, and unknowns as
+unsupported rather than filling them with assumptions.
+
+C017 remains paused through the activity-source decision. Garmin remains a
+separate deferred native-data audit after the Zepp architecture stabilizes.
