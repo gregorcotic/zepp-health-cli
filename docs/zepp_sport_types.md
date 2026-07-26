@@ -1,42 +1,49 @@
 # Zepp sport type catalog
 
-This is an evidence catalog, not a complete Zepp enum. The URL segment and the
-activity's numeric `type` are separate concepts. In particular,
-`/v1/sport/run/history.json` returned non-running production activities.
+The mapping identity is the exact `(type, sport_mode)` pair. Modes are never
+collapsed: mode 5 identifies a Zepp Coach activity even when its sport family
+matches mode 0.
 
-## Evidence grades
+Every mapping below was manually verified against a real activity in the
+user's Zepp app. This evidence grade is
+`PRODUCTION_PROVEN_MANUAL_APP_MATCH`. No other pair is mapped.
 
-- `PROVEN_FOR_FIXTURE`: app identity and several payload metrics match a known
-  production workout.
-- `OBSERVED`: an ID occurred in sanitized history but its app sport was not
-  independently matched.
-- `LIKELY`: external evidence suggests a mapping, but this project has not
-  production-matched it.
-- `UNKNOWN`: no defensible mapping.
+| Type | Mode | Zepp sport | Family | Coach mode | Evidence |
+|---:|---:|---|---|---|---|
+| 105 | 0 | Ski | Ski | no | production-proven manual app match |
+| 130 | 0 | Cross-training | Cross-training | no | production-proven manual app match |
+| 14 | 0 | Pool Swim | Swimming | no | production-proven manual app match |
+| 15 | 0 | Open Water Swim | Swimming | no | production-proven manual app match |
+| 15 | 5 | Open Water Swim - Zepp Coach | Swimming | yes | production-proven manual app match |
+| 207 | 0 | E-MTB | Cycling | no | production-proven manual app match |
+| 208 | 0 | Gravel Cycling | Cycling | no | production-proven manual app match |
+| 22 | 0 | Hiking | Hiking | no | production-proven manual app match |
+| 22 | 5 | Hiking - Zepp Coach | Hiking | yes | production-proven manual app match |
+| 224 | 0 | Mountain Hiking | Hiking | no | production-proven manual app match |
+| 6 | 0 | Walking | Walking | no | production-proven manual app match |
+| 6 | 5 | Walking - Zepp Coach | Walking | yes | production-proven manual app match |
+| 9 | 0 | Outdoor Cycling | Cycling | no | production-proven manual app match |
+| 9 | 5 | Outdoor Cycling - Zepp Coach | Cycling | yes | production-proven manual app match |
 
-## Current catalog
+`GET /v1/sport/run/history.json` returned all of these production groups, so it
+is proven broader than literal running for this account/window. Account-wide
+completeness and cursor semantics remain separate unresolved questions.
 
-| Type | Sport family | Evidence | Sport mode |
-|---:|---|---|---|
-| 22 | Hike | PROVEN_FOR_FIXTURE — 2026-07-25 Ojstrica | semantics unproven |
-| 130 | Cross-training | PROVEN_FOR_FIXTURE — 2026-07-22 | semantics unproven |
+## Ski semantic fixture
 
-No distinct Strength, Ride, Gravel, MTB, Pool Swim, Open Water Swim, Run,
-Trail Run, Alpine Ski, or Walk type has yet been supplied as production
-evidence. That means “not yet observed in this audit,” not “unsupported by
-Zepp.”
+The January 2 Ski fixture (`trackid=1767339463`) returned:
 
-## Route and privacy status
+- `altitude_ascend=0`
+- `altitude_descend=5921`
+- `climb_dis_descend=28133`
+- `max_altitude=1913`
+- `min_altitude=965`
 
-`GET /v1/sport/run/history.json` is proven broader than literal runs because it
-returned types 22 and 130. It is not yet proven to be a complete all-workout
-endpoint. `data.next` exists, but safe continuation semantics are unresolved.
+The Zepp app displayed about 5913 m vertical and the TCX was identified as the
+same activity. The app metric is vertical **descent**, represented by
+`altitude_descend` in this API capture; it is not ascent. The small 5913/5921
+difference may reflect display revision or processing and is not silently
+corrected.
 
-New mappings require a sanitized response plus a matching Zepp app workout.
-Never commit personal payloads, coordinates, device/user identifiers, or
-workout notes.
-
-The 2026 bounded inventory has 135 records in 14 `(type, sport_mode)` groups.
-Their unknown IDs are intentionally not cataloged as sports until app matching
-is returned. `diagnose-sport-coverage --mapping-list` supplies one safe
-representative end time and summary per group for that process.
+Never commit personal payloads, coordinates, device/user identifiers, tokens,
+URLs, or workout notes.

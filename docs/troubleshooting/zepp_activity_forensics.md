@@ -839,3 +839,47 @@ candidate, record its representative date/type/mode and match it in the Zepp
 app before adding the mapping catalog. The temporary JSON is sanitized but
 still contains representative activity IDs; remove it according to the
 operator's normal temporary-file policy after analysis.
+
+## Z001.7 Ski vertical semantic correction
+
+Historical symptom: the Ski activity's app vertical value (about 5913 m) could
+be mistaken for ascent by generic elevation processing.
+
+Production evidence from the exact sanitized record:
+
+```text
+type=105
+sport_mode=0
+trackid=1767339463
+altitude_ascend=0
+altitude_descend=5921
+climb_dis_descend=28133
+max_altitude=1913
+min_altitude=965
+```
+
+Root cause: raw metric presence and generic field categories do not establish
+sport semantics. For lift-served Ski, vertical descent is a primary exposure;
+lift altitude gain is not athlete-powered climbing.
+
+Correct behavior:
+
+- retain every raw vertical field;
+- normalize `altitude_descend` to `vertical_descent_m` and
+  `elevation_loss_m`, with production evidence;
+- do not normalize Ski lift gain to `elevation_gain_m`;
+- set climbing-load ascent to null and eligibility false;
+- keep numerical-quality validation separate from semantic interpretation.
+
+Read-only verification:
+
+```bash
+python3 zepp_health.py diagnose-activities \
+  --from-date 2026-01-02 --to-date 2026-01-02 \
+  --timezone Europe/Ljubljana --sport run \
+  --track-id 1767339463 --limit 1 --need-sub-data 1 --json
+```
+
+The diagnostic is allow-listed: it excludes credentials, device/user IDs,
+URLs, coordinate values, and activity text. Its `semantic_interpretation`
+section shows raw provenance and the normalized Ski decision.

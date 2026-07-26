@@ -11,6 +11,7 @@ from zepp_health import (
     diagnose_activity_payload,
     format_sport_coverage_mapping_list,
     inventory_activity_payload,
+    interpret_activity_metrics,
 )
 
 
@@ -359,9 +360,9 @@ class ActivityDiagnosticTests(unittest.TestCase):
             "data": {
                 "next": -1,
                 "summary": [
-                    {"trackid": 30, "type": 130, "sport_mode": 1, "run_time": 600},
-                    {"trackid": 31, "type": 130, "sport_mode": 1, "run_time": 700},
-                    {"trackid": 40, "type": 22, "sport_mode": 2, "dis": 10000},
+                    {"trackid": 30, "type": 130, "sport_mode": 0, "run_time": 600},
+                    {"trackid": 31, "type": 130, "sport_mode": 0, "run_time": 700},
+                    {"trackid": 40, "type": 22, "sport_mode": 0, "dis": 10000},
                     {"trackid": 50, "type": 999, "sport_mode": 3},
                 ],
             }
@@ -375,7 +376,7 @@ class ActivityDiagnosticTests(unittest.TestCase):
         mappings = {
             group["type"]: group["known_mapping"] for group in report["type_groups"]
         }
-        self.assertEqual(mappings[22]["sport_family"], "Hike")
+        self.assertEqual(mappings[22]["sport_family"], "Hiking")
         self.assertEqual(mappings[130]["sport_family"], "Cross-training")
         self.assertIsNone(mappings[999])
 
@@ -510,6 +511,222 @@ class ActivityDiagnosticTests(unittest.TestCase):
         self.assertIn("calories=500 kcal", output)
         self.assertIn("trackid=42", output)
         self.assertNotIn("Private activity", output)
+
+    def test_production_verified_catalog_preserves_type_and_mode_pairs(self) -> None:
+        expected = {
+            (105, 0): "Ski",
+            (130, 0): "Cross-training",
+            (14, 0): "Pool Swim",
+            (15, 0): "Open Water Swim",
+            (15, 5): "Open Water Swim - Zepp Coach",
+            (207, 0): "E-MTB",
+            (208, 0): "Gravel Cycling",
+            (22, 0): "Hiking",
+            (22, 5): "Hiking - Zepp Coach",
+            (224, 0): "Mountain Hiking",
+            (6, 0): "Walking",
+            (6, 5): "Walking - Zepp Coach",
+            (9, 0): "Outdoor Cycling",
+            (9, 5): "Outdoor Cycling - Zepp Coach",
+        }
+        payload = {
+            "data": {
+                "next": -1,
+                "summary": [
+                    {"trackid": index, "type": type_id, "sport_mode": mode}
+                    for index, (type_id, mode) in enumerate(expected, start=1)
+                ],
+            }
+        }
+        groups = inventory_activity_payload(payload)["type_groups"]
+        actual = {
+            (group["type"], group["sport_mode"]): group["known_mapping"]["sport_name"]
+            for group in groups
+        }
+        self.assertEqual(actual, expected)
+        self.assertNotEqual(
+            actual[(15, 0)], actual[(15, 5)]
+        )
+
+    def test_ski_vertical_descent_never_becomes_climbing_ascent(self) -> None:
+        fixture = {
+            "trackid": "1767339463",
+            "type": 105,
+            "sport_mode": 0,
+            "end_time": "1767354287",
+            "run_time": "14824",
+            "dis": "28130",
+            "altitude_ascend": 0,
+            "altitude_descend": 5913,
+            "max_altitude": 1913,
+            "min_altitude": 965,
+            "downhill_max_altitude_desend": 857,
+        }
+        result = interpret_activity_metrics(fixture)
+        self.assertEqual(result["sport_mapping"]["sport_name"], "Ski")
+        self.assertEqual(result["normalized_metrics"]["duration_s"]["value"], 14824)
+        self.assertEqual(result["normalized_metrics"]["distance_m"]["value"], 28130)
+        self.assertEqual(
+            result["normalized_metrics"]["vertical_descent_m"]["value"], 5913
+        )
+        self.assertEqual(
+            result["normalized_metrics"]["vertical_descent_m"]["source_field"],
+            "altitude_descend",
+        )
+        self.assertIsNone(
+            result["normalized_metrics"]["elevation_gain_m"]["value"]
+        )
+        self.assertFalse(result["climbing_load"]["eligible"])
+        self.assertIsNone(result["climbing_load"]["athlete_powered_ascent_m"])
+        self.assertEqual(result["raw_metrics"]["altitude_descend"], 5913)
+        self.assertEqual(result["raw_metrics"]["altitude_ascend"], 0)
+        self.assertEqual(result["raw_metrics"]["dis"], "28130")
+        self.assertEqual(result["metric_semantics"], "PROVEN")
+
+    def test_semantic_duration_uses_supported_fallback_precedence(self) -> None:
+        cases = (
+            (
+                {
+                    "run_time": 120,
+                    "exerciseTimeWithMillis": 110_000,
+                    "totalTimeWithMillis": 130_000,
+                },
+                120,
+                "run_time",
+            ),
+            (
+                {"exerciseTimeWithMillis": 110_500},
+                110.5,
+                "exerciseTimeWithMillis",
+            ),
+            (
+                {"totalTimeWithMillis": 130_250},
+                130.25,
+                "totalTimeWithMillis",
+            ),
+        )
+        for fields, expected_value, expected_source in cases:
+            with self.subTest(source=expected_source):
+                result = interpret_activity_metrics({
+                    "type": 130,
+                    "sport_mode": 0,
+                    **fields,
+                })
+                duration = result["normalized_metrics"]["duration_s"]
+                self.assertEqual(duration["value"], expected_value)
+                self.assertEqual(duration["source_field"], expected_source)
+
+    def test_hiking_sentinel_ascent_never_enables_climbing_load(self) -> None:
+        for sentinel in (-1, -100, -20000, -274):
+            with self.subTest(sentinel=sentinel):
+                result = interpret_activity_metrics({
+                    "type": 22,
+                    "sport_mode": 0,
+                    "altitude_ascend": sentinel,
+                })
+                self.assertEqual(
+                    result["raw_metrics"]["altitude_ascend"], sentinel
+                )
+                gain = result["normalized_metrics"]["elevation_gain_m"]
+                self.assertIsNone(gain["value"])
+                self.assertEqual(gain["source_field"], "altitude_ascend")
+                self.assertEqual(
+                    gain["reason"], "invalid_or_unavailable_ascent_metric"
+                )
+                self.assertFalse(result["climbing_load"]["eligible"])
+                self.assertIsNone(
+                    result["climbing_load"]["athlete_powered_ascent_m"]
+                )
+                self.assertEqual(
+                    result["climbing_load"]["reason"],
+                    "invalid_or_unavailable_ascent_metric",
+                )
+
+    def test_distance_sentinels_fall_back_and_preserve_raw_values(self) -> None:
+        for sentinel in (-1, -100, -20000, -274):
+            with self.subTest(sentinel=sentinel):
+                result = interpret_activity_metrics({
+                    "type": 22,
+                    "sport_mode": 0,
+                    "highPrecisionDistance": sentinel,
+                    "dis": 10000,
+                })
+                distance = result["normalized_metrics"]["distance_m"]
+                self.assertEqual(distance["value"], 10000)
+                self.assertEqual(distance["source_field"], "dis")
+                self.assertEqual(
+                    result["raw_metrics"]["highPrecisionDistance"], sentinel
+                )
+                self.assertEqual(result["raw_metrics"]["dis"], 10000)
+
+        unavailable = interpret_activity_metrics({
+            "type": 22,
+            "sport_mode": 0,
+            "highPrecisionDistance": -1,
+            "dis": -100,
+        })
+        distance = unavailable["normalized_metrics"]["distance_m"]
+        self.assertIsNone(distance["value"])
+        self.assertIsNone(distance["source_field"])
+        self.assertEqual(
+            unavailable["raw_metrics"]["highPrecisionDistance"], -1
+        )
+        self.assertEqual(unavailable["raw_metrics"]["dis"], -100)
+
+    def test_missing_hiking_ascent_has_factual_unavailable_reason(self) -> None:
+        cases = (
+            {},
+            {"altitude_ascend": ""},
+            {"altitude_ascend": "not-a-number"},
+        )
+        for fields in cases:
+            with self.subTest(fields=fields):
+                result = interpret_activity_metrics({
+                    "type": 22,
+                    "sport_mode": 0,
+                    **fields,
+                })
+                gain = result["normalized_metrics"]["elevation_gain_m"]
+                self.assertIsNone(gain["value"])
+                self.assertEqual(
+                    gain["reason"], "missing_or_unavailable_ascent_metric"
+                )
+                self.assertFalse(result["climbing_load"]["eligible"])
+                self.assertIsNone(
+                    result["climbing_load"]["athlete_powered_ascent_m"]
+                )
+                self.assertEqual(
+                    result["climbing_load"]["reason"],
+                    "missing_or_unavailable_ascent_metric",
+                )
+
+    def test_unknown_sport_semantics_never_enable_climbing_load(self) -> None:
+        result = interpret_activity_metrics({
+            "type": 999,
+            "sport_mode": 0,
+            "altitude_ascend": 1500,
+        })
+        self.assertIsNone(result["sport_mapping"])
+        self.assertEqual(result["metric_semantics"], "UNKNOWN")
+        self.assertFalse(result["climbing_load"]["eligible"])
+        self.assertIsNone(result["climbing_load"]["athlete_powered_ascent_m"])
+        self.assertEqual(result["raw_metrics"]["altitude_ascend"], 1500)
+
+    def test_inferred_coach_mode_ascent_is_not_yet_climbing_load(self) -> None:
+        result = interpret_activity_metrics({
+            "type": 22,
+            "sport_mode": 5,
+            "altitude_ascend": 800,
+        })
+        self.assertEqual(
+            result["sport_mapping"]["sport_name"], "Hiking - Zepp Coach"
+        )
+        self.assertEqual(result["metric_semantics"], "INFERRED")
+        self.assertFalse(result["climbing_load"]["eligible"])
+        self.assertEqual(
+            result["climbing_load"]["reason"],
+            "sport_metric_semantics_not_proven",
+        )
 
 
 if __name__ == "__main__":

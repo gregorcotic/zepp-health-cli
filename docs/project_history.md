@@ -18,6 +18,10 @@ performed on the MacBook account and must not expose credentials.
 
 - B004: SQLite persistence for native Zepp health data (`677181b`).
 - B003: daily-status/readiness and native metric consolidation (see Git history).
+- Z001.7: corrected the historical Ski vertical interpretation. The
+  production API field `altitude_descend=5921` corresponds to the app's
+  approximately 5913 m vertical descent; it must never be presented as ascent
+  or athlete-powered climbing load. Regression tests protect this rule.
 
 ## B006 — Production automation
 
@@ -292,3 +296,27 @@ An opt-in `--mapping-list` renders one compact line per group without exposing
 titles, notes, coordinates, device/user identifiers, URLs, or credentials.
 Unknown types remain unknown until the operator matches the representative
 record in the Zepp app; no new sport mappings were inferred or hard-coded.
+
+## Z001.7 — production sport catalog and metric semantics
+
+The operator manually matched all 14 current-year `(type, sport_mode)` groups
+against real Zepp app activities. Added exactly those pair-keyed mappings,
+including distinct mode-5 Zepp Coach variants. Mapping confidence is
+`PRODUCTION_PROVEN_MANUAL_APP_MATCH`; no other type/mode combination is
+inferred.
+
+A sanitized live diagnostic for the January 2 Ski fixture
+(`trackid=1767339463`, type/mode 105/0) returned
+`altitude_descend=5921`, `altitude_ascend=0`,
+`climb_dis_descend=28133`, and altitude range 965–1913 m. The app's
+approximately 5913 m vertical value is therefore descent, not ascent. The
+small app/API difference is retained as evidence rather than silently
+rewritten.
+
+Introduced a centralized sport-semantic layer. It preserves raw vertical
+fields, emits normalized metrics with source field/confidence/evidence, and
+allows climbing load only for profiles explicitly classed as
+athlete-powered ascent. Ski exposes `vertical_descent_m` and
+`elevation_loss_m`; normalized elevation gain and climbing-load ascent remain
+null. This complements, rather than replaces, the Ojstrica numerical-quality
+model: numerical trust and sport meaning are separate validation layers.

@@ -653,7 +653,8 @@ ACTIVITY_COVERAGE_FIELDS = (
     "elevationGain", "elevationLoss", "altitude_ascend",
     "altitude_descend", "highestAltitude", "lowestAltitude",
     "averageAltitude", "max_altitude", "min_altitude", "avg_altitude",
-    "distance_ascend", "totalClimbDistance", "swim_pool_length",
+    "distance_ascend", "climb_dis_descend", "totalClimbDistance",
+    "cumulativeClimbingAscent", "maximumClimbingAscent", "swim_pool_length",
     "waterType", "lap_distance", "swim_style", "swolf", "total_strokes",
     "totalStrokes", "strokes", "avg_stroke_speed", "max_stroke_speed",
     "avg_distance_per_stroke", "freestyle_length", "breast_stroke_length",
@@ -668,16 +669,97 @@ ACTIVITY_COVERAGE_FIELDS = (
     "avg_slope", "max_slope", "spo2_min", "spo2_max",
 )
 ACTIVITY_UNPROVEN_NEGATIVE_CANDIDATES = {-1, -100, -20000, -274}
-ACTIVITY_FIXTURE_MAPPINGS = {
-    22: {
-        "sport_family": "Hike",
-        "confidence": "PROVEN_FOR_FIXTURE",
-        "evidence": "2026-07-25 Ojstrica production fixture",
+ACTIVITY_SPORT_CATALOG = {
+    (105, 0): ("Ski", "Ski", False),
+    (130, 0): ("Cross-training", "Cross-training", False),
+    (14, 0): ("Pool Swim", "Swimming", False),
+    (15, 0): ("Open Water Swim", "Swimming", False),
+    (15, 5): ("Open Water Swim - Zepp Coach", "Swimming", True),
+    (207, 0): ("E-MTB", "Cycling", False),
+    (208, 0): ("Gravel Cycling", "Cycling", False),
+    (22, 0): ("Hiking", "Hiking", False),
+    (22, 5): ("Hiking - Zepp Coach", "Hiking", True),
+    (224, 0): ("Mountain Hiking", "Hiking", False),
+    (6, 0): ("Walking", "Walking", False),
+    (6, 5): ("Walking - Zepp Coach", "Walking", True),
+    (9, 0): ("Outdoor Cycling", "Cycling", False),
+    (9, 5): ("Outdoor Cycling - Zepp Coach", "Cycling", True),
+}
+ACTIVITY_SPORT_MAPPINGS = {
+    key: {
+        "type": key[0],
+        "sport_name": name,
+        "sport_family": family,
+        "sport_mode": key[1],
+        "zepp_coach_mode": coach_mode,
+        "confidence": "PRODUCTION_PROVEN_MANUAL_APP_MATCH",
+        "evidence": "Manually verified against a real Zepp app activity",
+    }
+    for key, (name, family, coach_mode) in ACTIVITY_SPORT_CATALOG.items()
+}
+ACTIVITY_PROVEN_METRIC_SEMANTICS = {
+    (105, 0),
+    (130, 0),
+    (22, 0),
+}
+ACTIVITY_SPORT_SEMANTICS = {
+    "Hiking": {
+        "primary_metrics": (
+            "distance", "duration", "elevation_gain", "elevation_loss",
+            "altitude", "heart_rate", "training_load", "steps",
+        ),
+        "athlete_powered_ascent": True,
+        "climbing_effort_relevant": True,
+        "semantic_confidence": "INFERRED",
     },
-    130: {
-        "sport_family": "Cross-training",
-        "confidence": "PROVEN_FOR_FIXTURE",
-        "evidence": "2026-07-22 production fixture",
+    "Walking": {
+        "primary_metrics": (
+            "distance", "duration", "elevation_gain", "elevation_loss",
+            "heart_rate", "training_load", "steps",
+        ),
+        "athlete_powered_ascent": True,
+        "climbing_effort_relevant": True,
+        "semantic_confidence": "INFERRED",
+    },
+    "Cycling": {
+        "primary_metrics": (
+            "distance", "duration", "elevation_gain", "elevation_loss",
+            "heart_rate", "training_load", "cadence", "power",
+        ),
+        "athlete_powered_ascent": True,
+        "climbing_effort_relevant": True,
+        "semantic_confidence": "INFERRED",
+    },
+    "Swimming": {
+        "primary_metrics": (
+            "distance", "duration", "heart_rate", "training_load",
+            "strokes", "swolf", "stroke_style", "pool_length",
+        ),
+        "athlete_powered_ascent": False,
+        "climbing_effort_relevant": False,
+        "semantic_confidence": "INFERRED",
+    },
+    "Cross-training": {
+        "primary_metrics": (
+            "duration", "heart_rate", "training_load", "exertion",
+            "strength_detail",
+        ),
+        "athlete_powered_ascent": False,
+        "climbing_effort_relevant": False,
+        "semantic_confidence": "PROVEN",
+    },
+    "Ski": {
+        "primary_metrics": (
+            "distance", "duration", "vertical_descent", "descent_count",
+            "heart_rate", "training_load", "altitude",
+        ),
+        "athlete_powered_ascent": False,
+        "climbing_effort_relevant": False,
+        "semantic_confidence": "PROVEN",
+        "notes": (
+            "altitude_descend is vertical descent; lift-assisted ascent is not "
+            "athlete-powered climbing load"
+        ),
     },
 }
 
@@ -873,6 +955,217 @@ def _activity_gps_track_evidence(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _activity_number(value: Any) -> int | float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, str):
+        try:
+            number = float(value)
+        except ValueError:
+            return None
+        return int(number) if number.is_integer() else number
+    return None
+
+
+def _activity_is_unavailable_sentinel(value: Any) -> bool:
+    number = _activity_number(value)
+    return number in ACTIVITY_UNPROVEN_NEGATIVE_CANDIDATES
+
+
+def _activity_usable_metric_number(value: Any) -> int | float | None:
+    if _activity_is_unavailable_sentinel(value):
+        return None
+    return _activity_number(value)
+
+
+def _activity_duration_seconds(
+    record: dict[str, Any],
+) -> tuple[int | float | None, str | None]:
+    """Resolve duration using the established run/total/exercise precedence."""
+    for field, divisor in (
+        ("run_time", 1),
+        ("totalTimeWithMillis", 1000),
+        ("exerciseTimeWithMillis", 1000),
+    ):
+        value = _activity_usable_metric_number(record.get(field))
+        if value is not None:
+            return value if divisor == 1 else value / divisor, field
+    return None, None
+
+
+def _activity_distance_metres(
+    record: dict[str, Any],
+) -> tuple[int | float | None, str | None]:
+    """Resolve distance using the established high-precision/dis precedence."""
+    for field in ("highPrecisionDistance", "dis"):
+        value = _activity_usable_metric_number(record.get(field))
+        if value is not None:
+            return value, field
+    return None, None
+
+
+def _activity_sport_mapping(record: dict[str, Any]) -> dict[str, Any] | None:
+    type_value = _activity_number(record.get("type"))
+    mode_value = _activity_number(record.get("sport_mode"))
+    if not isinstance(type_value, int) or not isinstance(mode_value, int):
+        return None
+    return ACTIVITY_SPORT_MAPPINGS.get((type_value, mode_value))
+
+
+def interpret_activity_metrics(record: dict[str, Any]) -> dict[str, Any]:
+    """Apply centralized sport semantics while retaining raw source metrics."""
+    mapping = _activity_sport_mapping(record)
+    raw_fields = (
+        "run_time", "totalTimeWithMillis", "exerciseTimeWithMillis",
+        "dis", "highPrecisionDistance", "calorie",
+        "altitude_ascend", "altitude_descend", "elevationGain",
+        "elevationLoss", "cumulativeClimbingAscent",
+        "maximumClimbingAscent", "downhill_num",
+        "downhill_max_altitude_desend", "max_altitude", "min_altitude",
+        "avg_altitude",
+    )
+    raw_metrics = {
+        field: record[field] for field in raw_fields if field in record
+    }
+    if mapping is None:
+        return {
+            "sport_mapping": None,
+            "metric_semantics": "UNKNOWN",
+            "semantic_profile": None,
+            "raw_metrics": raw_metrics,
+            "normalized_metrics": {},
+            "climbing_load": {
+                "athlete_powered_ascent_m": None,
+                "eligible": False,
+                "reason": "unknown_sport_semantics",
+            },
+        }
+
+    profile = ACTIVITY_SPORT_SEMANTICS[mapping["sport_family"]]
+    mapping_key = (mapping["type"], mapping["sport_mode"])
+    semantic_confidence = (
+        "PROVEN"
+        if mapping_key in ACTIVITY_PROVEN_METRIC_SEMANTICS
+        else profile["semantic_confidence"]
+    )
+    normalized: dict[str, Any] = {}
+    duration, duration_field = _activity_duration_seconds(record)
+    distance, distance_field = _activity_distance_metres(record)
+    calories = _activity_number(record.get("calorie"))
+    normalized.update({
+        "duration_s": {
+            "value": duration,
+            "source_field": duration_field,
+            "semantic_confidence": "PROVEN" if duration is not None else "UNKNOWN",
+        },
+        "distance_m": {
+            "value": distance,
+            "source_field": distance_field if distance is not None else None,
+            "semantic_confidence": "PROVEN" if distance is not None else "UNKNOWN",
+        },
+        "calories_kcal": {
+            "value": calories,
+            "source_field": "calorie" if calories is not None else None,
+            "semantic_confidence": "PROVEN" if calories is not None else "UNKNOWN",
+        },
+    })
+    climbing_ascent = None
+    ascent_metric_invalid = False
+    ascent_metric_missing = False
+    if mapping["sport_family"] == "Ski":
+        descent = _activity_usable_metric_number(record.get("altitude_descend"))
+        normalized["vertical_descent_m"] = {
+            "value": descent,
+            "source_field": "altitude_descend" if descent is not None else None,
+            "semantic_confidence": "PROVEN" if descent is not None else "UNKNOWN",
+            "evidence": (
+                "Production Ski fixture trackid 1767339463: API "
+                "altitude_descend=5921; Zepp app displayed approximately 5913 m"
+                if descent is not None
+                else "No altitude_descend value"
+            ),
+        }
+        normalized["elevation_loss_m"] = dict(normalized["vertical_descent_m"])
+        normalized["elevation_gain_m"] = {
+            "value": None,
+            "source_field": None,
+            "semantic_confidence": "PROVEN",
+            "reason": "ski_lift_ascent_is_not_athlete_powered_climbing",
+        }
+    elif profile["athlete_powered_ascent"]:
+        raw_ascent = record.get("altitude_ascend")
+        ascent_metric_invalid = _activity_is_unavailable_sentinel(raw_ascent)
+        ascent = _activity_usable_metric_number(raw_ascent)
+        ascent_metric_missing = ascent is None and not ascent_metric_invalid
+        descent = _activity_usable_metric_number(record.get("altitude_descend"))
+        normalized["elevation_gain_m"] = {
+            "value": ascent,
+            "source_field": (
+                "altitude_ascend"
+                if ascent is not None or ascent_metric_invalid
+                else None
+            ),
+            "semantic_confidence": (
+                semantic_confidence if ascent is not None else "UNKNOWN"
+            ),
+        }
+        if ascent_metric_invalid:
+            normalized["elevation_gain_m"]["reason"] = (
+                "invalid_or_unavailable_ascent_metric"
+            )
+        elif ascent_metric_missing:
+            normalized["elevation_gain_m"]["reason"] = (
+                "missing_or_unavailable_ascent_metric"
+            )
+        normalized["elevation_loss_m"] = {
+            "value": descent,
+            "source_field": "altitude_descend" if descent is not None else None,
+            "semantic_confidence": (
+                semantic_confidence if descent is not None else "UNKNOWN"
+            ),
+        }
+        climbing_ascent = ascent
+
+    return {
+        "sport_mapping": mapping,
+        "metric_semantics": semantic_confidence,
+        "semantic_profile": profile,
+        "raw_metrics": raw_metrics,
+        "normalized_metrics": normalized,
+        "climbing_load": {
+            "athlete_powered_ascent_m": climbing_ascent,
+            "eligible": (
+                profile["climbing_effort_relevant"]
+                and semantic_confidence == "PROVEN"
+                and climbing_ascent is not None
+            ),
+            "reason": (
+                "invalid_or_unavailable_ascent_metric"
+                if ascent_metric_invalid
+                else (
+                    "missing_or_unavailable_ascent_metric"
+                    if ascent_metric_missing
+                    else (
+                        "sport_semantics_classify_ascent_as_athlete_powered"
+                        if (
+                            profile["climbing_effort_relevant"]
+                            and semantic_confidence == "PROVEN"
+                            and climbing_ascent is not None
+                        )
+                        else (
+                            "sport_metric_semantics_not_proven"
+                            if profile["climbing_effort_relevant"]
+                            else "sport_semantics_exclude_climbing_load"
+                        )
+                    )
+                )
+            ),
+        },
+    }
+
+
 def _activity_summary(
     record: dict[str, Any], *, include_text: bool = False
 ) -> dict[str, Any]:
@@ -944,6 +1237,7 @@ def _activity_summary(
         **gps,
         "omitted_sensitive_field_names": sorted(omitted_sensitive),
         "unknown_scalar_field_names": sorted(unknown_scalar_fields),
+        "semantic_interpretation": interpret_activity_metrics(record),
     }
 
 
@@ -1006,11 +1300,7 @@ def _activity_field_status(record: dict[str, Any], field: str) -> str:
     value = record[field]
     if value is None or value == "" or value == [] or value == {}:
         return "PRESENT_EMPTY"
-    if (
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and value in ACTIVITY_UNPROVEN_NEGATIVE_CANDIDATES
-    ):
+    if _activity_is_unavailable_sentinel(value):
         return "UNKNOWN_SEMANTICS"
     return "PRESENT_WITH_VALUE"
 
@@ -1046,25 +1336,9 @@ def _activity_representative_metrics(
     end_time = record.get("end_time")
     local_date, local_time = _activity_local_end_parts(end_time, timezone_name)
 
-    duration = None
-    duration_field = None
-    if isinstance(record.get("run_time"), (int, float)):
-        duration = record["run_time"]
-        duration_field = "run_time"
-    elif isinstance(record.get("totalTimeWithMillis"), (int, float)):
-        duration = record["totalTimeWithMillis"] / 1000
-        duration_field = "totalTimeWithMillis"
-    elif isinstance(record.get("exerciseTimeWithMillis"), (int, float)):
-        duration = record["exerciseTimeWithMillis"] / 1000
-        duration_field = "exerciseTimeWithMillis"
+    duration, duration_field = _activity_duration_seconds(record)
 
-    distance = None
-    distance_field = None
-    for field in ("highPrecisionDistance", "dis"):
-        if isinstance(record.get(field), (int, float)):
-            distance = record[field]
-            distance_field = field
-            break
+    distance, distance_field = _activity_distance_metres(record)
 
     calories = (
         record.get("calorie")
@@ -1117,15 +1391,31 @@ def inventory_activity_payload(
         gps_evidence = [_activity_gps_track_evidence(item) for item in members]
         try:
             numeric_type = int(type_value)
+            numeric_mode = int(sport_mode)
         except (TypeError, ValueError):
             numeric_type = None
+            numeric_mode = None
         type_groups.append({
             "type": representative.get("type"),
             "sport_mode": representative.get("sport_mode"),
             "record_count": len(members),
             "representative_trackid": representative.get("trackid"),
             **_activity_representative_metrics(representative, timezone_name),
-            "known_mapping": ACTIVITY_FIXTURE_MAPPINGS.get(numeric_type),
+            "known_mapping": ACTIVITY_SPORT_MAPPINGS.get(
+                (numeric_type, numeric_mode)
+            ),
+            "metric_semantics": (
+                ACTIVITY_SPORT_SEMANTICS[
+                    ACTIVITY_SPORT_MAPPINGS[(numeric_type, numeric_mode)][
+                        "sport_family"
+                    ]
+                ]
+                if (numeric_type, numeric_mode) in ACTIVITY_SPORT_MAPPINGS
+                else None
+            ),
+            "representative_semantic_interpretation": interpret_activity_metrics(
+                representative
+            ),
             "field_status_counts": statuses,
             "location_metadata_present_count": sum(
                 item.get("location") not in (None, "", [], {}) for item in members

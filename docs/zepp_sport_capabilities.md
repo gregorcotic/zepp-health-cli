@@ -1,65 +1,73 @@
-# Zepp native sport capabilities
+# Zepp native sport capabilities and semantics
 
-Status here means production evidence, not field-name availability. A raw
-track is not required for basic coach ingestion when the native summary is
-sufficient; it is primarily an advanced validation and route-analysis input.
+Raw metric presence does not prove metric semantics. Activity processing has
+two independent questions:
 
-## Current basic-ingestion assessment
+1. Is the recorded number numerically trustworthy?
+2. What does that number mean for this sport?
 
-| Sport | Found | Type | Assessment | Basis / blocker |
-|---|---:|---:|---|---|
-| Hike | yes | 22 | READY_FOR_BASIC_INGESTION | distance, time, pause, HR, calories, load, TE, RPE, elevation summary |
-| Cross-training | yes | 130 | READY_FOR_BASIC_INGESTION | time, HR, calories, load; strength detail/notes unresolved |
-| Strength | no distinct fixture | — | INSUFFICIENT_EVIDENCE | distinct type and structured content unknown |
-| Ride | no | — | NOT_FOUND | production inventory required |
-| Gravel | no | — | NOT_FOUND | type/sport_mode distinction unknown |
-| MTB | no | — | NOT_FOUND | type/sport_mode distinction unknown |
-| Pool Swim | no | — | NOT_FOUND | pool/lap/stroke population untested |
-| Open Water Swim | no | — | NOT_FOUND | swim metrics and GPS population untested |
-| Run | no matched fixture | — | INSUFFICIENT_EVIDENCE | route name is not a sport mapping |
-| Trail Run | no | — | NOT_FOUND | type/sport_mode distinction unknown |
-| Alpine Ski | no | — | NOT_FOUND | downhill/elevation fields untested |
-| Walk | no | — | NOT_FOUND | structural distinction from Hike untested |
+Ojstrica remains the numerical elevation-quality fixture. Ski is the semantic
+fixture: a correct vertical-descent number would still be wrong if exposed as
+athlete-powered ascent.
 
-## Capability matrix
+## Production-proven catalog capability matrix
 
-`YES` means populated production evidence. `PARTIAL` means useful summary
-coverage with an unresolved dimension. `UNKNOWN` means no suitable fixture.
+`SUMMARY` means the native history summary provides the category in observed
+schemas; population still varies by activity/sensor. `N/A` means the metric is
+not a primary sport semantic. Raw GPS samples remain undiscovered in history.
 
-| Sport | Distance | Time/pause | HR | Load/TE/RPE | GPS | Elevation | Cadence/power | Swim detail | Strength detail | Title/notes |
-|---|---|---|---|---|---|---|---|---|---|---|
-| Hike | YES | YES | YES | YES | UNKNOWN | YES summary | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | UNKNOWN |
-| Cross-training | NOT_APPLICABLE | YES | YES | PARTIAL | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | UNKNOWN | UNKNOWN |
-| Strength | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | UNKNOWN | UNKNOWN |
-| Ride/Gravel/MTB | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN | NOT_APPLICABLE | NOT_APPLICABLE | UNKNOWN |
-| Pool Swim | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | UNKNOWN | NOT_APPLICABLE | UNKNOWN |
-| Open Water Swim | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN | NOT_APPLICABLE | NOT_APPLICABLE | UNKNOWN | NOT_APPLICABLE | UNKNOWN |
-| Run/Trail Run | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN | NOT_APPLICABLE | NOT_APPLICABLE | UNKNOWN |
-| Alpine Ski | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | UNKNOWN |
-| Walk | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN | NOT_APPLICABLE | NOT_APPLICABLE | UNKNOWN |
+| Sport | Type/mode | Mapping | Distance | Duration | HR/load | Ascent | Descent | Altitude | GPS | Swim | Strength | Semantic note |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Ski | 105/0 | PROVEN | SUMMARY | SUMMARY | SUMMARY | not climbing load | `altitude_descend`, PROVEN | SUMMARY | location only | N/A | N/A | lift gain excluded; vertical descent primary |
+| Cross-training | 130/0 | PROVEN | secondary | SUMMARY | SUMMARY | N/A | N/A | N/A | N/A | N/A | PARTIAL | exertion/strength structures may be empty |
+| Pool Swim | 14/0 | PROVEN | SUMMARY | SUMMARY | SUMMARY | N/A | N/A | N/A | not expected | SUMMARY | N/A | pool length/strokes/SWOLF/style |
+| Open Water Swim | 15/0 | PROVEN | SUMMARY | SUMMARY | SUMMARY | N/A | N/A | N/A | summary location; raw track unknown | SUMMARY | N/A | open-water semantics |
+| Open Water Swim - Coach | 15/5 | PROVEN | SUMMARY | SUMMARY | SUMMARY | N/A | N/A | N/A | raw track unknown | SUMMARY | N/A | mode 5 retained |
+| E-MTB | 207/0 | PROVEN | SUMMARY | SUMMARY | SUMMARY | sport-relevant, field semantics inferred | SUMMARY | SUMMARY | raw track unknown | N/A | N/A | cadence/power sensor-dependent |
+| Gravel Cycling | 208/0 | PROVEN | SUMMARY | SUMMARY | SUMMARY | sport-relevant, field semantics inferred | SUMMARY | SUMMARY | raw track unknown | N/A | N/A | cadence/power sensor-dependent |
+| Hiking | 22/0 | PROVEN | SUMMARY | SUMMARY | SUMMARY | `altitude_ascend`, fixture-proven | `altitude_descend` | SUMMARY | raw track unknown | N/A | N/A | athlete-powered ascent eligible |
+| Hiking - Coach | 22/5 | PROVEN | SUMMARY | SUMMARY | SUMMARY | sport-relevant, field semantics inferred | SUMMARY | SUMMARY | raw track unknown | N/A | N/A | mode 5 retained |
+| Mountain Hiking | 224/0 | PROVEN | SUMMARY | SUMMARY | SUMMARY | sport-relevant, field semantics inferred | SUMMARY | SUMMARY | raw track unknown | N/A | N/A | athlete-powered ascent eligible |
+| Walking | 6/0 | PROVEN | SUMMARY | SUMMARY | SUMMARY | sport-relevant, field semantics inferred | SUMMARY | SUMMARY | raw track unknown | N/A | N/A | steps primary |
+| Walking - Coach | 6/5 | PROVEN | SUMMARY | SUMMARY | SUMMARY | sport-relevant, field semantics inferred | SUMMARY | SUMMARY | raw track unknown | N/A | N/A | mode 5 retained |
+| Outdoor Cycling | 9/0 | PROVEN | SUMMARY | SUMMARY | SUMMARY | sport-relevant, field semantics inferred | SUMMARY | SUMMARY | raw track unknown | N/A | N/A | cycling metrics sensor-dependent |
+| Outdoor Cycling - Coach | 9/5 | PROVEN | SUMMARY | SUMMARY | SUMMARY | sport-relevant, field semantics inferred | SUMMARY | SUMMARY | raw track unknown | N/A | N/A | mode 5 retained |
 
-## Field-state and unit rules
+Mapping confidence and metric-semantic confidence are separate. All table
+mappings are production-proven. Only field meanings backed by the supplied
+fixtures are marked semantically proven; other sport-profile expectations are
+`INFERRED` or `UNKNOWN`.
 
-The coverage diagnostic distinguishes populated, empty, absent, and
-unknown-semantics fields. Candidate negatives `-1`, `-100`, `-20000`, and
-`-274` are not converted to missing without fixture evidence.
+## Central semantic safety rule
 
-Production evidence currently supports seconds for `run_time`, milliseconds
-for `totalTimeWithMillis`/`exerciseTimeWithMillis`/`pauseTimeWithMillis`,
-metres for Ojstrica `highPrecisionDistance`, bpm for matched HR fields, and
-kcal for matched Cross-training `calorie`. Ojstrica strongly supports `/100`
-scaling for its paired centi-metre elevation/altitude fields, but this is not
-yet declared universal. Other units remain field- or sport-specific.
+The semantic layer retains raw fields, selects normalized meanings, and emits
+provenance. A vertical value can enter climbing load only when the sport
+profile explicitly sets both and the exact pair's field semantics are
+`PROVEN`:
 
-## Optional Strava value
+- `athlete_powered_ascent=true`
+- `climbing_effort_relevant=true`
 
-Strava remains useful for custom titles/descriptions, exported route access,
-historical cross-checks, and secondary distance/elevation comparison. These
-are optional-enrichment candidates, not automatic ground truth. Production
-breadth must be proven for the remaining sports before Zepp can be declared
-primary across roughly 95% of the user's activities.
+For Ski both are false. `altitude_descend` becomes `vertical_descent_m` and
+`elevation_loss_m`; normalized `elevation_gain_m` and climbing-load ascent are
+null. Raw `altitude_ascend`, `altitude_descend`, and related fields remain
+available for forensics.
 
-The first current-year inventory returned 14 type/mode groups. Capability
-classification remains unchanged until the representative rows are manually
-matched to their Zepp app sport labels; field patterns alone are not mapping
-evidence.
+At present the exact metric semantics are proven for 105/0 Ski, 22/0 Hiking,
+and the non-elevation 130/0 Cross-training profile. Other catalog mappings are
+production-proven as sport identities, but their metric profiles remain
+`INFERRED`; their vertical values cannot yet enter climbing load.
+
+## Units and remaining limits
+
+- `run_time`: seconds in matched fixtures.
+- `highPrecisionDistance`/`dis`: metres in matched fixtures.
+- `altitude_ascend`/`altitude_descend`: whole metres in the Ski and Ojstrica
+  captures.
+- Ojstrica's parallel high-precision elevation/altitude fields support `/100`
+  scaling on that fixture only.
+- GPS/altitude/HR sample streams remain undiscovered through history.
+- Titles and Workout Notes remain unavailable through the proven summary path.
+
+Strava remains optional validation/enrichment for titles, notes, exported
+routes, and cross-source comparison; it is not automatic ground truth.
