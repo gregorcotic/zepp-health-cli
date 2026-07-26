@@ -257,3 +257,26 @@ references. Ojstrica's current flags are source disagreement plus strong
 absolute-altitude agreement and pending native-track validation—not invalid
 Zepp elevation. C017 remains paused and no downstream, Garmin, production, or
 repository restructuring occurred.
+
+## Z001.6 — bounded multi-sport coverage discovery
+
+Shifted the activity audit from deeper Ojstrica track work to breadth across
+the user's main sports. Added `diagnose-sport-coverage`, a read-only,
+single-request inventory over the production-proven
+`GET /v1/sport/run/history.json` route. It groups records by exact `type` and
+`sport_mode`, reports one representative identifier, classifies allow-listed
+fields as populated, empty, absent, or unknown-semantics, and summarizes actual
+GPS/altitude/workout-HR sample evidence without coordinates or activity text.
+
+The command deliberately does not follow `data.next`. A `next=-1` response is
+reported only as a terminal single-page observation; any other cursor makes
+the requested-window counts explicitly incomplete. Cursor direction,
+continuation bounds, and loop termination remain unproven.
+
+Only two mappings are currently production-fixture-backed: type 22 is the July
+25 Ojstrica Hike and type 130 is the July 22 Cross-training workout. The
+`/run/` route is proven broader than literal running, but it is not yet proven
+to contain every activity type. Ride/Gravel/MTB, Pool Swim, Open Water Swim,
+Run/Trail Run, Ski, Walk, and a distinct Strength type remain
+production-pending. C017 stays paused; no production, downstream, storage, or
+repository-structure changes were made.

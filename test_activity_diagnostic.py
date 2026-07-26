@@ -9,6 +9,7 @@ from zepp_health import (
     _activity_diagnostic_window,
     compare_activity_sub_data_payloads,
     diagnose_activity_payload,
+    inventory_activity_payload,
 )
 
 
@@ -351,6 +352,97 @@ class ActivityDiagnosticTests(unittest.TestCase):
         self.assertNotIn("Private detail", rendered)
         self.assertNotIn("46.1", rendered)
         self.assertNotIn("14.2", rendered)
+
+    def test_coverage_inventory_groups_types_and_labels_fixture_mappings(self) -> None:
+        payload = {
+            "data": {
+                "next": -1,
+                "summary": [
+                    {"trackid": 30, "type": 130, "sport_mode": 1, "run_time": 600},
+                    {"trackid": 31, "type": 130, "sport_mode": 1, "run_time": 700},
+                    {"trackid": 40, "type": 22, "sport_mode": 2, "dis": 10000},
+                    {"trackid": 50, "type": 999, "sport_mode": 3},
+                ],
+            }
+        }
+        report = inventory_activity_payload(payload)
+        self.assertEqual(report["raw_record_count"], 4)
+        self.assertEqual(report["type_group_count"], 3)
+        self.assertTrue(
+            report["pagination"]["counts_are_complete_for_requested_window"]
+        )
+        mappings = {
+            group["type"]: group["known_mapping"] for group in report["type_groups"]
+        }
+        self.assertEqual(mappings[22]["sport_family"], "Hike")
+        self.assertEqual(mappings[130]["sport_family"], "Cross-training")
+        self.assertIsNone(mappings[999])
+
+    def test_coverage_inventory_distinguishes_empty_absent_and_unknown_negative(self) -> None:
+        payload = {
+            "data": {
+                "next": 123,
+                "summary": [{
+                    "trackid": 1,
+                    "type": 9,
+                    "sport_mode": 0,
+                    "average_power": -1,
+                    "sport_title": "",
+                    "avg_cadence": 81,
+                }],
+            }
+        }
+        report = inventory_activity_payload(payload)
+        group = report["type_groups"][0]
+        states = group["field_status_counts"]
+        self.assertEqual(states["average_power"], {"UNKNOWN_SEMANTICS": 1})
+        self.assertEqual(states["sport_title"], {"PRESENT_EMPTY": 1})
+        self.assertEqual(states["avg_cadence"], {"PRESENT_WITH_VALUE": 1})
+        self.assertEqual(states["swolf"], {"ABSENT": 1})
+        self.assertEqual(
+            report["pagination"]["status"], "INCOMPLETE_PAGINATION_UNRESOLVED"
+        )
+        self.assertFalse(
+            report["pagination"]["counts_are_complete_for_requested_window"]
+        )
+
+    def test_coverage_inventory_is_sport_aware_and_coordinate_safe(self) -> None:
+        payload = {
+            "data": {
+                "next": -1,
+                "summary": [
+                    {
+                        "trackid": 10,
+                        "type": 80,
+                        "sport_mode": 1,
+                        "swim_pool_length": 25,
+                        "swolf": 41,
+                        "location": {"latitude": 46.1, "longitude": 14.2},
+                        "sport_title": "Private pool session",
+                    },
+                    {
+                        "trackid": 11,
+                        "type": 81,
+                        "sport_mode": 2,
+                        "route": [{
+                            "timestamp": 1,
+                            "lat": 46.2,
+                            "lon": 14.3,
+                            "heart_rate": 120,
+                        }],
+                    },
+                ],
+            }
+        }
+        report = inventory_activity_payload(payload)
+        groups = {group["type"]: group for group in report["type_groups"]}
+        self.assertEqual(groups[80]["location_metadata_present_count"], 1)
+        self.assertEqual(groups[80]["gps_track_present_count"], 0)
+        self.assertEqual(groups[81]["gps_track_present_count"], 1)
+        rendered = json.dumps(report)
+        self.assertNotIn("Private pool session", rendered)
+        self.assertNotIn("46.1", rendered)
+        self.assertNotIn("14.3", rendered)
 
 
 if __name__ == "__main__":

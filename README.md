@@ -91,6 +91,11 @@ python3 zepp_health.py diagnose-activities \
   --timezone Europe/Ljubljana --sport run \
   --track-id TRACKID --compare-sub-data --json
 
+# Bounded activity-type inventory (one page; no guessed cursor traversal)
+python3 zepp_health.py diagnose-sport-coverage \
+  --from-date 2026-04-28 --to-date 2026-07-26 \
+  --timezone Europe/Ljubljana --need-sub-data 1 --json
+
 # Sleep / steps / band payload (large JSON; often base64-encoded blobs)
 python3 zepp_health.py band-data --days 14
 python3 zepp_health.py band-data --from-date 2026-04-01 --to-date 2026-04-18
@@ -207,6 +212,7 @@ All data requests are **GET**s to your regional `host`, with header `apptoken: <
 | `weight` | `GET /users/{id}/members/-1/weightRecords` |
 | `run-history` | `GET /v1/sport/{sport}/history.json` (default `sport=run`) |
 | `diagnose-activities` | Same sport-specific endpoint, with sanitized field/shape reporting for a narrow local-date window |
+| `diagnose-sport-coverage` | One-page bounded `/run/history` inventory grouped by `type` and `sport_mode`; unresolved pagination is explicit |
 | `band-data` | `GET /v1/data/band_data.json` (sleep/steps sync payload; often large) |
 | `manual-data` | `GET /v1/user/manualData.json` |
 | `user-info` | `GET /huami.health.getUserInfo.json` |

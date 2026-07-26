@@ -641,6 +641,45 @@ ACTIVITY_NESTED_DETAIL_FIELDS = (
 ACTIVITY_COORDINATE_KEYS = {
     "lat", "latitude", "lon", "lng", "longitude",
 }
+ACTIVITY_COVERAGE_FIELDS = (
+    "trackid", "type", "sport_mode", "start_time", "end_time",
+    "syncedTimezone", "run_time", "totalTimeWithMillis",
+    "exerciseTimeWithMillis", "pause_time", "pauseTimeWithMillis",
+    "dis", "highPrecisionDistance", "calorie", "avg_heart_rate",
+    "max_heart_rate", "min_heart_rate", "exercise_load", "te",
+    "anaerobic_te", "rpe", "VO2_max", "sport_title", "crossfitContent",
+    "avg_pace", "max_pace", "min_pace", "avg_cadence", "max_cadence",
+    "average_power", "max_power", "avg_stride_length", "total_step",
+    "elevationGain", "elevationLoss", "altitude_ascend",
+    "altitude_descend", "highestAltitude", "lowestAltitude",
+    "averageAltitude", "max_altitude", "min_altitude", "avg_altitude",
+    "distance_ascend", "totalClimbDistance", "swim_pool_length",
+    "waterType", "lap_distance", "swim_style", "swolf", "total_strokes",
+    "totalStrokes", "strokes", "avg_stroke_speed", "max_stroke_speed",
+    "avg_distance_per_stroke", "freestyle_length", "breast_stroke_length",
+    "back_stroke_length", "butterfly_length", "other_stroke_length",
+    "medley_length", "strengthScores", "strength_training_group",
+    "totalCardiacExertion", "totalMuscularExertion", "totalExertion",
+    "workoutBalance", "totalWeightLoad", "total_group", "child_list",
+    "add_info", "originSummary", "runningType", "runningProgram",
+    "downhill_num", "durationOfDownhillWithMillis",
+    "downhill_max_altitude_desend", "averageAirTemp", "highestAirTemp",
+    "lowestAirTemp", "avg_pressure", "max_pressure", "min_pressure",
+    "avg_slope", "max_slope", "spo2_min", "spo2_max",
+)
+ACTIVITY_UNPROVEN_NEGATIVE_CANDIDATES = {-1, -100, -20000, -274}
+ACTIVITY_FIXTURE_MAPPINGS = {
+    22: {
+        "sport_family": "Hike",
+        "confidence": "PROVEN_FOR_FIXTURE",
+        "evidence": "2026-07-25 Ojstrica production fixture",
+    },
+    130: {
+        "sport_family": "Cross-training",
+        "confidence": "PROVEN_FOR_FIXTURE",
+        "evidence": "2026-07-22 production fixture",
+    },
+}
 
 
 def _activity_records(data: Any) -> list[dict[str, Any]]:
@@ -961,6 +1000,104 @@ def diagnose_activity_payload(
     }
 
 
+def _activity_field_status(record: dict[str, Any], field: str) -> str:
+    if field not in record:
+        return "ABSENT"
+    value = record[field]
+    if value is None or value == "" or value == [] or value == {}:
+        return "PRESENT_EMPTY"
+    if (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and value in ACTIVITY_UNPROVEN_NEGATIVE_CANDIDATES
+    ):
+        return "UNKNOWN_SEMANTICS"
+    return "PRESENT_WITH_VALUE"
+
+
+def _activity_response_next(data: Any) -> Any:
+    if isinstance(data, dict) and isinstance(data.get("data"), dict):
+        return data["data"].get("next")
+    return None
+
+
+def inventory_activity_payload(
+    data: Any, *, sport_segment: str = "run"
+) -> dict[str, Any]:
+    """Group one bounded history response without claiming complete pagination."""
+    records = _activity_records(data)
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for record in records:
+        key = (str(record.get("type")), str(record.get("sport_mode")))
+        groups.setdefault(key, []).append(record)
+
+    type_groups: list[dict[str, Any]] = []
+    for (type_value, sport_mode), members in sorted(groups.items()):
+        representative = max(
+            members,
+            key=lambda item: int(item.get("trackid", 0))
+            if str(item.get("trackid", "")).isdigit()
+            else 0,
+        )
+        statuses: dict[str, dict[str, int]] = {}
+        for field in ACTIVITY_COVERAGE_FIELDS:
+            counts = Counter(_activity_field_status(item, field) for item in members)
+            statuses[field] = dict(sorted(counts.items()))
+        gps_evidence = [_activity_gps_track_evidence(item) for item in members]
+        try:
+            numeric_type = int(type_value)
+        except (TypeError, ValueError):
+            numeric_type = None
+        type_groups.append({
+            "type": representative.get("type"),
+            "sport_mode": representative.get("sport_mode"),
+            "record_count": len(members),
+            "representative_trackid": representative.get("trackid"),
+            "known_mapping": ACTIVITY_FIXTURE_MAPPINGS.get(numeric_type),
+            "field_status_counts": statuses,
+            "location_metadata_present_count": sum(
+                item.get("location") not in (None, "", [], {}) for item in members
+            ),
+            "gps_track_present_count": sum(
+                item["gps_track_present"] for item in gps_evidence
+            ),
+            "altitude_stream_present_count": sum(
+                item["altitude_stream_present"] for item in gps_evidence
+            ),
+            "workout_hr_stream_present_count": sum(
+                item["workout_hr_stream_present"] for item in gps_evidence
+            ),
+        })
+
+    next_cursor = _activity_response_next(data)
+    if next_cursor == -1:
+        page_status = "SINGLE_PAGE_TERMINAL_OBSERVED"
+    elif next_cursor is None:
+        page_status = "CURSOR_NOT_PRESENT"
+    else:
+        page_status = "INCOMPLETE_PAGINATION_UNRESOLVED"
+    return {
+        "sport_segment": sport_segment,
+        "raw_record_count": len(records),
+        "type_group_count": len(type_groups),
+        "observed_type_ids": sorted(
+            {item.get("type") for item in records},
+            key=lambda value: str(value),
+        ),
+        "pagination": {
+            "next": next_cursor,
+            "status": page_status,
+            "followed": False,
+            "counts_are_complete_for_requested_window": next_cursor == -1,
+            "note": (
+                "No cursor is followed because data.next continuation semantics "
+                "are not proven."
+            ),
+        },
+        "type_groups": type_groups,
+    }
+
+
 def _activity_record_by_track_id(
     data: Any, track_id: str | int
 ) -> dict[str, Any] | None:
@@ -1194,6 +1331,61 @@ def cmd_diagnose_activities(args: argparse.Namespace) -> None:
             "content is omitted unless --include-text is explicit."
         ),
         "sports": sports,
+    }
+    _emit_json(report, args)
+
+
+def cmd_diagnose_sport_coverage(args: argparse.Namespace) -> None:
+    timezone_name = args.timezone or load_config().get("timezone") or FRESHNESS_TIMEZONE
+    try:
+        start_track_id, stop_track_id = _activity_diagnostic_window(
+            args.from_date, args.to_date, timezone_name
+        )
+    except (ValueError, KeyError) as exc:
+        sys.exit(f"Invalid sport coverage date range/timezone: {exc}")
+    client = _load_client()
+    try:
+        payload = client.sport_history(
+            "run", start_track_id, stop_track_id, need_sub_data=args.need_sub_data
+        )
+        inventory = inventory_activity_payload(payload, sport_segment="run")
+        request_status = "ok"
+    except requests.RequestException as exc:
+        inventory = {
+            "sport_segment": "run",
+            "raw_record_count": 0,
+            "type_group_count": 0,
+            "observed_type_ids": [],
+            "type_groups": [],
+            "error": type(exc).__name__,
+        }
+        if exc.response is not None:
+            inventory["http_status"] = exc.response.status_code
+        request_status = "error"
+    report = {
+        "endpoint_contract": {
+            "method": "GET",
+            "path": "/v1/sport/run/history.json",
+            "role": (
+                "proven broader than literal runs; all-sport completeness remains "
+                "unproven"
+            ),
+            "pagination": "not_followed_unproven",
+        },
+        "request": {
+            "from_date": args.from_date,
+            "to_date": args.to_date,
+            "timezone": timezone_name,
+            "startTrackId": start_track_id,
+            "stopTrackId": stop_track_id,
+            "need_sub_data": args.need_sub_data,
+        },
+        "privacy": (
+            "Grouped summaries only. Credentials, user/device identifiers, URLs, "
+            "coordinates, and activity text values are omitted."
+        ),
+        "request_status": request_status,
+        "inventory": inventory,
     }
     _emit_json(report, args)
 
@@ -3099,6 +3291,26 @@ def main() -> None:
         help="Explicitly include title/description/note values; omitted by default",
     )
     sp.set_defaults(func=cmd_diagnose_activities)
+
+    sp = sub.add_parser(
+        "diagnose-sport-coverage",
+        help="Bounded privacy-safe inventory of activity types from run history",
+    )
+    _add_json(sp)
+    sp.add_argument("--from-date", required=True, help="First local date YYYY-MM-DD")
+    sp.add_argument("--to-date", required=True, help="Last local date YYYY-MM-DD")
+    sp.add_argument(
+        "--timezone",
+        help="IANA timezone for local bounds (default config or Europe/Ljubljana)",
+    )
+    sp.add_argument(
+        "--need-sub-data",
+        type=int,
+        choices=(0, 1),
+        default=1,
+        help="Request Zepp sub-data (default 1)",
+    )
+    sp.set_defaults(func=cmd_diagnose_sport_coverage)
 
     sp = sub.add_parser("summary", help="Brief text summary")
     _add_days(sp)

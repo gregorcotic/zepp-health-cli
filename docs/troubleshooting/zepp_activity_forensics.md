@@ -709,3 +709,111 @@ python3 zepp_health.py diagnose-activities \
   --sport run --track-id NORMAL_HIKE_TRACKID \
   --limit 1 --compare-sub-data --json
 ```
+
+## Z001.6 multi-sport inventory
+
+Use the bounded coverage command before treating a quiet sport-specific URL
+segment as evidence that a sport is unavailable:
+
+```bash
+python3 zepp_health.py diagnose-sport-coverage \
+  --from-date 2026-04-28 \
+  --to-date 2026-07-26 \
+  --timezone Europe/Ljubljana \
+  --need-sub-data 1 \
+  --json
+```
+
+The result is grouped by `(type, sport_mode)`. `PRESENT_WITH_VALUE` means only
+that a nonempty value exists; its semantics or units may remain unknown.
+`PRESENT_EMPTY` and `ABSENT` are distinct. Candidate negatives `-1`, `-100`,
+`-20000`, and `-274` are `UNKNOWN_SEMANTICS`, not proven unavailable
+sentinels. GPS requires an actual coordinate-bearing sample collection;
+location metadata alone does not qualify.
+
+Pagination remains an evidence boundary. `SINGLE_PAGE_TERMINAL_OBSERVED`
+means that response contained `data.next=-1`; it does not prove general cursor
+semantics. `INCOMPLETE_PAGINATION_UNRESOLVED` means counts must not be used as
+complete coverage for the window.
+
+The current mappings are deliberately narrow: type 22 is proven for the
+Ojstrica Hike fixture and type 130 for the July 22 Cross-training fixture. See
+`docs/zepp_sport_types.md` and `docs/zepp_sport_capabilities.md`.
+
+### Staged production probes (read-only)
+
+Run phase A first. Phase B is useful only if a required sport is absent and
+the phase-A pagination status is terminal. A nonterminal `next` makes absence
+inconclusive.
+
+```bash
+cd /opt/zepp-health-cli
+source .venv/bin/activate
+
+# A — recent 90-day grouped inventory
+python3 zepp_health.py diagnose-sport-coverage \
+  --from-date 2026-04-28 --to-date 2026-07-26 \
+  --timezone Europe/Ljubljana --need-sub-data 1 --json \
+  | tee /tmp/zepp-sport-coverage-90d.json
+
+# B — current-year grouped inventory, only if phase A is insufficient
+python3 zepp_health.py diagnose-sport-coverage \
+  --from-date 2026-01-01 --to-date 2026-07-26 \
+  --timezone Europe/Ljubljana --need-sub-data 1 --json \
+  | tee /tmp/zepp-sport-coverage-2026.json
+
+# C — proven Hike fixture
+python3 zepp_health.py diagnose-activities \
+  --from-date 2026-07-25 --to-date 2026-07-25 \
+  --timezone Europe/Ljubljana --sport run \
+  --track-id 1784948221 --limit 1 --need-sub-data 1 --json
+
+# D — proven Cross-training fixture
+python3 zepp_health.py diagnose-activities \
+  --from-date 2026-07-22 --to-date 2026-07-22 \
+  --timezone Europe/Ljubljana --sport run \
+  --track-id 1784739852 --limit 1 --need-sub-data 1 --json
+
+# E — Ride/Gravel/MTB candidates: cadence or power populated
+jq '.inventory.type_groups[] | select(
+  ((.field_status_counts.avg_cadence.PRESENT_WITH_VALUE // 0) > 0) or
+  ((.field_status_counts.average_power.PRESENT_WITH_VALUE // 0) > 0)
+)' /tmp/zepp-sport-coverage-2026.json
+
+# F — Pool Swim candidates: pool length, SWOLF, or lap distance populated
+jq '.inventory.type_groups[] | select(
+  ((.field_status_counts.swim_pool_length.PRESENT_WITH_VALUE // 0) > 0) or
+  ((.field_status_counts.swolf.PRESENT_WITH_VALUE // 0) > 0) or
+  ((.field_status_counts.lap_distance.PRESENT_WITH_VALUE // 0) > 0)
+)' /tmp/zepp-sport-coverage-2026.json
+
+# G — Open Water Swim candidates: water type/strokes plus real GPS evidence
+jq '.inventory.type_groups[] | select(
+  (((.field_status_counts.waterType.PRESENT_WITH_VALUE // 0) > 0) or
+   ((.field_status_counts.total_strokes.PRESENT_WITH_VALUE // 0) > 0)) and
+  (.gps_track_present_count > 0)
+)' /tmp/zepp-sport-coverage-2026.json
+
+# H — Run/Trail Run candidates: pace or running subtype populated
+jq '.inventory.type_groups[] | select(
+  ((.field_status_counts.avg_pace.PRESENT_WITH_VALUE // 0) > 0) or
+  ((.field_status_counts.runningType.PRESENT_WITH_VALUE // 0) > 0)
+)' /tmp/zepp-sport-coverage-2026.json
+
+# I — Ski candidates: downhill count/duration populated
+jq '.inventory.type_groups[] | select(
+  ((.field_status_counts.downhill_num.PRESENT_WITH_VALUE // 0) > 0) or
+  ((.field_status_counts.durationOfDownhillWithMillis.PRESENT_WITH_VALUE // 0) > 0)
+)' /tmp/zepp-sport-coverage-2026.json
+
+# J — Walk candidates: steps populated; confirm the type in the Zepp app
+jq '.inventory.type_groups[] | select(
+  ((.field_status_counts.total_step.PRESENT_WITH_VALUE // 0) > 0)
+)' /tmp/zepp-sport-coverage-2026.json
+```
+
+These metric filters produce candidates, not sport mappings. For every
+candidate, record its representative date/type/mode and match it in the Zepp
+app before adding the mapping catalog. The temporary JSON is sanitized but
+still contains representative activity IDs; remove it according to the
+operator's normal temporary-file policy after analysis.
