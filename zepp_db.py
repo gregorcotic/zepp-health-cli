@@ -18,7 +18,7 @@ from typing import Any, Iterator
 from zoneinfo import ZoneInfo
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 DEFAULT_DB_PATH = Path("data") / "zepp_health.db"
 _REMOVED_KEYS = {
     "app_token", "apptoken", "authorization", "cookie", "cookies",
@@ -477,6 +477,17 @@ CREATE INDEX IF NOT EXISTS idx_activity_sync_finished
     ON activity_sync_runs(finished_at, status);
 """
 
+SCHEMA_V5_SQL = """
+ALTER TABLE exertion_records ADD COLUMN recovery_factor_id TEXT;
+ALTER TABLE exertion_records ADD COLUMN target_score TEXT;
+ALTER TABLE exertion_records ADD COLUMN completion_percent TEXT;
+ALTER TABLE exertion_records ADD COLUMN insight_state TEXT;
+ALTER TABLE exertion_records ADD COLUMN exercise_plan_intensity TEXT;
+ALTER TABLE exertion_records ADD COLUMN exercise_plan_duration TEXT;
+ALTER TABLE exertion_records ADD COLUMN exercise_plan_hr_lower TEXT;
+ALTER TABLE exertion_records ADD COLUMN exercise_plan_hr_upper TEXT;
+"""
+
 
 class Database:
     def __init__(self, path: str | Path) -> None:
@@ -521,6 +532,34 @@ class Database:
                     "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('schema_version', '4')"
                 )
                 self.connection.execute("PRAGMA user_version = 4")
+                current = 4
+            if current < 5:
+                existing_columns = {
+                    row[1]
+                    for row in self.connection.execute(
+                        "PRAGMA table_info(exertion_records)"
+                    ).fetchall()
+                }
+                exertion_v5_columns = {
+                    "recovery_factor_id": "TEXT",
+                    "target_score": "TEXT",
+                    "completion_percent": "TEXT",
+                    "insight_state": "TEXT",
+                    "exercise_plan_intensity": "TEXT",
+                    "exercise_plan_duration": "TEXT",
+                    "exercise_plan_hr_lower": "TEXT",
+                    "exercise_plan_hr_upper": "TEXT",
+                }
+                for column, column_type in exertion_v5_columns.items():
+                    if column not in existing_columns:
+                        self.connection.execute(
+                            f"ALTER TABLE exertion_records "
+                            f"ADD COLUMN {column} {column_type}"
+                        )
+                self.connection.execute(
+                    "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('schema_version', '5')"
+                )
+                self.connection.execute("PRAGMA user_version = 5")
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -1309,14 +1348,30 @@ class Database:
         )
         selected_fields = {
             "wake_energy": ("bio_charge_wake", "wake_charge", "physical_wake", "mental_wake", "daily_fitness_score", "stress_fitness_score", "exertion_score"),
-            "exertion": ("recovery_factor", "total_score", "activity_score", "exercise_score", "atl", "ctl", "tsb"),
+            "exertion": (
+                "recovery_factor",
+                "recovery_factor_id",
+                "total_score",
+                "activity_score",
+                "exercise_score",
+                "target_score",
+                "completion_percent",
+                "atl",
+                "ctl",
+                "tsb",
+                "insight_state",
+                "exercise_plan_intensity",
+                "exercise_plan_duration",
+                "exercise_plan_hr_lower",
+                "exercise_plan_hr_upper",
+            ),
             "readiness": ("status", "hrv_score", "sleep_hrv", "rhr_score", "sleep_rhr", "phy_score", "ment_score", "skin_temp_score", "ahi_score", "rdns_score"),
             "sleep_related_readiness": ("sleep_hrv", "sleep_rhr", "ahi_score", "ahi_baseline", "rdns_score"),
             "lifeload": ("life_load",),
         }
         output_names = {
             "bio_charge_wake": "bioChargeWake", "wake_charge": "wakeCharge", "physical_wake": "physicalWake", "mental_wake": "mentalWake", "daily_fitness_score": "dailyFitnessScore", "stress_fitness_score": "stressFitnessScore", "exertion_score": "exertionScore",
-            "recovery_factor": "recoveryFactor", "total_score": "totalScore", "activity_score": "activityScore", "exercise_score": "exerciseScore", "atl": "atl", "ctl": "ctl", "tsb": "tsb", "status": "status", "hrv_score": "hrvScore", "sleep_hrv": "sleepHRV", "rhr_score": "rhrScore", "sleep_rhr": "sleepRHR", "phy_score": "phyScore", "ment_score": "mentScore", "skin_temp_score": "skinTempScore", "ahi_score": "ahiScore", "ahi_baseline": "ahiBaseline", "rdns_score": "rdnsScore", "life_load": "lifeLoad",
+            "recovery_factor": "recoveryFactor", "recovery_factor_id": "recoveryFactorID", "total_score": "totalScore", "activity_score": "activityScore", "exercise_score": "exerciseScore", "target_score": "targetScore", "completion_percent": "completionPercent", "atl": "atl", "ctl": "ctl", "tsb": "tsb", "insight_state": "insightState", "exercise_plan_intensity": "exercise_plan_intensity", "exercise_plan_duration": "exercise_plan_duration", "exercise_plan_hr_lower": "exercise_plan_hr_lower", "exercise_plan_hr_upper": "exercise_plan_hr_upper", "status": "status", "hrv_score": "hrvScore", "sleep_hrv": "sleepHRV", "rhr_score": "rhrScore", "sleep_rhr": "sleepRHR", "phy_score": "phyScore", "ment_score": "mentScore", "skin_temp_score": "skinTempScore", "ahi_score": "ahiScore", "ahi_baseline": "ahiBaseline", "rdns_score": "rdnsScore", "life_load": "lifeLoad",
         }
         for name, table, order_by in specs:
             query = f"SELECT * FROM {table} WHERE event_date BETWEEN ? AND ? ORDER BY event_date, {order_by}"
@@ -1470,7 +1525,25 @@ def _domain_rows(domain: str, rows: list[dict[str, Any]]) -> list[tuple[str, lis
     columns = {
         "hrv": ("event_date", "timestamp_ms", "start_time_ms", "offset_ms", "hrv", "raw_u"),
         "wake_energy": ("event_date", "timestamp_ms", "start_time_ms", "sample_timestamp_ms", "offset_ms", "bio_charge_wake", "wake_charge", "physical_wake", "mental_wake", "daily_fitness_score", "stress_fitness_score", "exertion_score"),
-        "exertion": ("event_date", "timestamp_ms", "recovery_factor", "total_score", "activity_score", "exercise_score", "atl", "ctl", "tsb"),
+        "exertion": (
+            "event_date",
+            "timestamp_ms",
+            "recovery_factor",
+            "recovery_factor_id",
+            "total_score",
+            "activity_score",
+            "exercise_score",
+            "target_score",
+            "completion_percent",
+            "atl",
+            "ctl",
+            "tsb",
+            "insight_state",
+            "exercise_plan_intensity",
+            "exercise_plan_duration",
+            "exercise_plan_hr_lower",
+            "exercise_plan_hr_upper",
+        ),
         "readiness": ("event_date", "timestamp_ms", "timestamp_update_ms", "status", "hrv_score", "sleep_hrv", "rhr_score", "sleep_rhr", "phy_score", "ment_score", "skin_temp_score", "ahi_score", "rdns_score"),
         "charge": ("event_date", "timestamp_ms", "start_time_ms", "sample_timestamp_ms", "offset_ms", "end_offset_ms", "total", "physical", "mental", "raw_u"),
         "insights": ("event_date", "timestamp_ms", "start_time_ms", "insight_id", "insight", "type", "diff", "slope", "start_offset_ms", "end_offset_ms", "track_id", "threshold", "raw_u", "parsed_json_extra"),
@@ -1481,7 +1554,7 @@ def _domain_rows(domain: str, rows: list[dict[str, Any]]) -> list[tuple[str, lis
     for row in now_rows:
         converted_row = dict(row)
         aliases = {
-            "event_date": "date", "timestamp_ms": "timestamp", "start_time_ms": "start_time", "offset_ms": "s", "sample_timestamp_ms": "sample_timestamp", "end_offset_ms": "e", "bio_charge_wake": "bioChargeWake", "wake_charge": "wakeCharge", "physical_wake": "physicalWake", "mental_wake": "mentalWake", "daily_fitness_score": "dailyFitnessScore", "stress_fitness_score": "stressFitnessScore", "exertion_score": "exertionScore", "recovery_factor": "recoveryFactor", "total_score": "totalScore", "activity_score": "activityScore", "exercise_score": "exerciseScore", "timestamp_update_ms": "timestampUpdate", "hrv_score": "hrvScore", "sleep_hrv": "sleepHRV", "rhr_score": "rhrScore", "sleep_rhr": "sleepRHR", "phy_score": "phyScore", "ment_score": "mentScore", "skin_temp_score": "skinTempScore", "ahi_score": "ahiScore", "ahi_baseline": "ahiBaseline", "rdns_score": "rdnsScore", "life_load": "lifeLoad", "insight_id": "insight_id", "track_id": "track_id", "threshold": "threshold", "parsed_json_extra": "parsed_json_extra", "raw_u": "raw_u",
+            "event_date": "date", "timestamp_ms": "timestamp", "start_time_ms": "start_time", "offset_ms": "s", "sample_timestamp_ms": "sample_timestamp", "end_offset_ms": "e", "bio_charge_wake": "bioChargeWake", "wake_charge": "wakeCharge", "physical_wake": "physicalWake", "mental_wake": "mentalWake", "daily_fitness_score": "dailyFitnessScore", "stress_fitness_score": "stressFitnessScore", "exertion_score": "exertionScore", "recovery_factor": "recoveryFactor", "recovery_factor_id": "recoveryFactorID", "total_score": "totalScore", "activity_score": "activityScore", "exercise_score": "exerciseScore", "target_score": "targetScore", "completion_percent": "completionPercent", "insight_state": "insightState", "exercise_plan_intensity": "exercise_plan_intensity", "exercise_plan_duration": "exercise_plan_duration", "exercise_plan_hr_lower": "exercise_plan_hr_lower", "exercise_plan_hr_upper": "exercise_plan_hr_upper", "timestamp_update_ms": "timestampUpdate", "hrv_score": "hrvScore", "sleep_hrv": "sleepHRV", "rhr_score": "rhrScore", "sleep_rhr": "sleepRHR", "phy_score": "phyScore", "ment_score": "mentScore", "skin_temp_score": "skinTempScore", "ahi_score": "ahiScore", "ahi_baseline": "ahiBaseline", "rdns_score": "rdnsScore", "life_load": "lifeLoad", "insight_id": "insight_id", "track_id": "track_id", "threshold": "threshold", "parsed_json_extra": "parsed_json_extra", "raw_u": "raw_u",
         }
         for target, source in aliases.items():
             converted_row[target] = row.get(source)

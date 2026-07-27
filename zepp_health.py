@@ -4289,6 +4289,50 @@ def normalize_wake_data(data: Any) -> list[dict[str, Any]]:
     )
 
 
+EXERTION_FIELDS = (
+    "recoveryFactor",
+    "recoveryFactorID",
+    "totalScore",
+    "activityScore",
+    "exerciseScore",
+    "targetScore",
+    "completionPercent",
+    "atl",
+    "ctl",
+    "tsb",
+    "insightState",
+)
+
+
+def normalize_exertion_data(data: Any) -> list[dict[str, Any]]:
+    """Normalize Zepp exertion/algo_result without recalculating native values.
+
+    The nested exercisePlan is exposed as convenience fields while the complete
+    native payload remains available in raw_value.
+    """
+    rows = _normalize_value_records(
+        data,
+        "exertion",
+        "algo_result",
+        EXERTION_FIELDS,
+        confidence="confirmed",
+    )
+    for row in rows:
+        raw_value = row.get("raw_value")
+        plan = raw_value.get("exercisePlan") if isinstance(raw_value, dict) else None
+        if not isinstance(plan, dict):
+            continue
+        if "intensity" in plan:
+            row["exercise_plan_intensity"] = plan["intensity"]
+        if "duration" in plan:
+            row["exercise_plan_duration"] = plan["duration"]
+        if "heartRateLower" in plan:
+            row["exercise_plan_hr_lower"] = plan["heartRateLower"]
+        if "heartRateUpper" in plan:
+            row["exercise_plan_hr_upper"] = plan["heartRateUpper"]
+    return rows
+
+
 def _wake_timezone_name(value: Any) -> str | None:
     """Parse the exact Zepp wake_data timezone forms observed in production."""
     if not value:
@@ -4674,15 +4718,34 @@ def cmd_wake_energy(args: argparse.Namespace) -> None:
 def cmd_exertion(args: argparse.Namespace) -> None:
     c = _load_client()
     from_ms, to_ms = _ms_window(args.days)
-    rows = _normalize_value_records(
-        c.events("exertion", "algo_result", from_ms, to_ms, limit=args.limit),
-        "exertion", "algo_result",
-        ("recoveryFactor", "totalScore", "activityScore", "exerciseScore", "atl", "ctl", "tsb"),
+    rows = normalize_exertion_data(
+        c.events("exertion", "algo_result", from_ms, to_ms, limit=args.limit)
     )
     if args.json:
         _emit_json(rows, args)
     else:
-        _print_rows("Zepp exertion / algorithm results", rows, ("date", "recoveryFactor", "totalScore", "activityScore", "exerciseScore", "atl", "ctl", "tsb"))
+        _print_rows(
+            "Zepp exertion / algorithm results",
+            rows,
+            (
+                "date",
+                "recoveryFactor",
+                "recoveryFactorID",
+                "totalScore",
+                "activityScore",
+                "exerciseScore",
+                "targetScore",
+                "completionPercent",
+                "atl",
+                "ctl",
+                "tsb",
+                "insightState",
+                "exercise_plan_intensity",
+                "exercise_plan_duration",
+                "exercise_plan_hr_lower",
+                "exercise_plan_hr_upper",
+            ),
+        )
 
 
 def cmd_lifeload(args: argparse.Namespace) -> None:
@@ -4768,7 +4831,27 @@ def consolidate_daily_status(
         target["hrv_sample_count"] += 1
     for name, rows, fields in (
         ("wake_energy", wake_rows, ("bioChargeWake", "wakeCharge", "physicalWake", "mentalWake", "dailyFitnessScore", "stressFitnessScore", "exertionScore")),
-        ("exertion", exertion_rows, ("recoveryFactor", "totalScore", "activityScore", "exerciseScore", "atl", "ctl", "tsb")),
+        (
+            "exertion",
+            exertion_rows,
+            (
+                "recoveryFactor",
+                "recoveryFactorID",
+                "totalScore",
+                "activityScore",
+                "exerciseScore",
+                "targetScore",
+                "completionPercent",
+                "atl",
+                "ctl",
+                "tsb",
+                "insightState",
+                "exercise_plan_intensity",
+                "exercise_plan_duration",
+                "exercise_plan_hr_lower",
+                "exercise_plan_hr_upper",
+            ),
+        ),
         ("lifeload", lifeload_rows, ("lifeLoad",)),
         ("readiness", readiness_rows, READINESS_FIELDS),
         ("sleep_related_readiness", sleep_rows, ("sleepHRV", "sleepRHR", "ahiScore", "ahiBaseline", "rdnsScore")),
@@ -4817,7 +4900,9 @@ def cmd_daily_status(args: argparse.Namespace) -> None:
     from_ms, to_ms = _ms_window(args.days)
     hrv = normalize_hrv_data(c.events("HRVRMSSD", "real_data", from_ms, to_ms, limit=args.limit))
     wake = normalize_wake_data(c.events("Charge", "wake_data", from_ms, to_ms, limit=args.limit))
-    exertion = _normalize_value_records(c.events("exertion", "algo_result", from_ms, to_ms, limit=args.limit), "exertion", "algo_result", ("recoveryFactor", "totalScore", "activityScore", "exerciseScore", "atl", "ctl", "tsb"))
+    exertion = normalize_exertion_data(
+        c.events("exertion", "algo_result", from_ms, to_ms, limit=args.limit)
+    )
     lifeload = _normalize_value_records(c.events("LifeLoad", "summary", from_ms, to_ms, limit=args.limit), "LifeLoad", "summary", ("lifeLoad",), confidence="candidate")
     readiness = normalize_readiness_data(c.events("readiness", "watch_score", from_ms, to_ms, limit=args.limit))
     rows = consolidate_daily_status(hrv, wake, exertion, lifeload, readiness, readiness)
@@ -4838,7 +4923,7 @@ def cmd_daily_status(args: argparse.Namespace) -> None:
 SYNC_DOMAIN_SPECS: tuple[tuple[str, str, str, Any], ...] = (
     ("hrv", "HRVRMSSD", "real_data", normalize_hrv_data),
     ("wake_energy", "Charge", "wake_data", normalize_wake_data),
-    ("exertion", "exertion", "algo_result", lambda data: _normalize_value_records(data, "exertion", "algo_result", ("recoveryFactor", "totalScore", "activityScore", "exerciseScore", "atl", "ctl", "tsb"))),
+    ("exertion", "exertion", "algo_result", normalize_exertion_data),
     ("readiness", "readiness", "watch_score", normalize_readiness_data),
     ("charge", "Charge", "real_data", normalize_charge_data),
     ("insights", "Charge", "insight_data", lambda data: _insight_rows(normalize_insight_data(data))),

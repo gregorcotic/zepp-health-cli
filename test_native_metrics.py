@@ -10,6 +10,7 @@ from zepp_health import (
     discover_event_domains,
     latest_readiness_per_day,
     normalize_charge_data,
+    normalize_exertion_data,
     normalize_hrv_data,
     normalize_readiness_data,
     normalize_wake_data,
@@ -253,16 +254,39 @@ class NativeMetricsTests(unittest.TestCase):
 
     def test_exertion_and_lifeload_field_names_are_not_recalculated(self) -> None:
         payload = {"items": [{"date": "2026-07-08", "value": {
-            "recoveryFactor": 0.8, "totalScore": 90, "activityScore": 30,
-            "exerciseScore": 40, "atl": 12, "ctl": 20, "tsb": 8,
-            "exercisePlan": {"id": 1},
+            "recoveryFactor": 0.8,
+            "recoveryFactorID": 3,
+            "totalScore": 90,
+            "activityScore": 30,
+            "exerciseScore": 40,
+            "targetScore": 60,
+            "completionPercent": 150,
+            "atl": 12,
+            "ctl": 20,
+            "tsb": 8,
+            "insightState": 6,
+            "exercisePlan": {
+                "intensity": 1,
+                "duration": 40,
+                "heartRateLower": 120,
+                "heartRateUpper": 150,
+                "futurePlanField": "preserved",
+            },
         }}]}
-        rows = _normalize_value_records(
-            payload, "exertion", "algo_result",
-            ("recoveryFactor", "totalScore", "activityScore", "exerciseScore", "atl", "ctl", "tsb"),
-        )
+        rows = normalize_exertion_data(payload)
         self.assertEqual(rows[0]["atl"], 12)
-        self.assertEqual(rows[0]["raw_value"]["exercisePlan"], {"id": 1})
+        self.assertEqual(rows[0]["recoveryFactorID"], 3)
+        self.assertEqual(rows[0]["targetScore"], 60)
+        self.assertEqual(rows[0]["completionPercent"], 150)
+        self.assertEqual(rows[0]["insightState"], 6)
+        self.assertEqual(rows[0]["exercise_plan_intensity"], 1)
+        self.assertEqual(rows[0]["exercise_plan_duration"], 40)
+        self.assertEqual(rows[0]["exercise_plan_hr_lower"], 120)
+        self.assertEqual(rows[0]["exercise_plan_hr_upper"], 150)
+        self.assertEqual(
+            rows[0]["raw_value"]["exercisePlan"]["futurePlanField"],
+            "preserved",
+        )
         life = _normalize_value_records(
             {"items": [{"date": "2026-07-08", "value": {"lifeLoad": 65, "other": 1}}]},
             "LifeLoad", "summary", ("lifeLoad",), confidence="candidate",

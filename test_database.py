@@ -50,7 +50,25 @@ def fixture_responses():
         }]},
         ("exertion", "algo_result"): {"items": [{
             "date": "2026-07-08", "timestamp": 1000000,
-            "value": {"recoveryFactor": 2, "totalScore": 20, "activityScore": 8, "exerciseScore": 12, "atl": 4, "ctl": 5, "tsb": 1},
+            "value": {
+                "recoveryFactor": 2,
+                "recoveryFactorID": 3,
+                "totalScore": 20,
+                "activityScore": 8,
+                "exerciseScore": 12,
+                "targetScore": 15,
+                "completionPercent": 133,
+                "atl": 4,
+                "ctl": 5,
+                "tsb": 1,
+                "insightState": 6,
+                "exercisePlan": {
+                    "intensity": 1,
+                    "duration": 10,
+                    "heartRateLower": 120,
+                    "heartRateUpper": 150,
+                },
+            },
         }]},
         ("readiness", "watch_score"): {"items": [{
             "userId": "fixture-user", "date": "2026-07-08", "timestamp": 1000000, "timestampUpdate": 1000001,
@@ -191,6 +209,22 @@ class DatabaseTests(unittest.TestCase):
             db = Database(path)
             self.assertEqual(db.status()["schema_version"], SCHEMA_VERSION)
             self.assertIn("lifeload_records", db.status()["record_counts"])
+            exertion_columns = {
+                row[1]
+                for row in db.connection.execute(
+                    "PRAGMA table_info(exertion_records)"
+                ).fetchall()
+            }
+            self.assertTrue({
+                "recovery_factor_id",
+                "target_score",
+                "completion_percent",
+                "insight_state",
+                "exercise_plan_intensity",
+                "exercise_plan_duration",
+                "exercise_plan_hr_lower",
+                "exercise_plan_hr_upper",
+            }.issubset(exertion_columns))
             db.close()
 
     def test_sync_is_idempotent_and_preserves_unknowns_and_raw_payloads(self):
@@ -208,6 +242,28 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(status["record_counts"]["sleep_related_readiness"], 1)
             self.assertEqual(status["record_counts"]["insight_records"], 1)
             self.assertEqual(status["record_counts"]["raw_payloads"], 7)
+
+            exertion = db.connection.execute(
+                """SELECT recovery_factor_id, target_score, completion_percent,
+                          insight_state, exercise_plan_intensity,
+                          exercise_plan_duration, exercise_plan_hr_lower,
+                          exercise_plan_hr_upper
+                   FROM exertion_records"""
+            ).fetchone()
+            self.assertEqual(
+                tuple(exertion),
+                ("3", "15", "133", "6", "1", "10", "120", "150"),
+            )
+
+            daily = db.read_daily_status("2026-07-08", "2026-07-08")[0]["exertion"]
+            self.assertEqual(daily["recoveryFactorID"], "3")
+            self.assertEqual(daily["targetScore"], "15")
+            self.assertEqual(daily["completionPercent"], "133")
+            self.assertEqual(daily["insightState"], "6")
+            self.assertEqual(daily["exercise_plan_duration"], "10")
+            self.assertEqual(daily["exercise_plan_hr_lower"], "120")
+            self.assertEqual(daily["exercise_plan_hr_upper"], "150")
+
             rows = db.connection.execute("SELECT payload_json FROM raw_payloads").fetchall()
             combined = " ".join(row[0] for row in rows)
             self.assertNotIn("fixture-user", combined)
