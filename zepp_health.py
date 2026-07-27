@@ -4748,6 +4748,488 @@ def cmd_exertion(args: argparse.Namespace) -> None:
         )
 
 
+def _decode_json_mapping(value: Any) -> dict[str, Any]:
+    """Decode an observed Zepp JSON object while preserving unknown structures."""
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str):
+        return {}
+    try:
+        decoded = json.loads(value)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def _find_native_field(value: Any, field: str) -> Any:
+    """Return the first exact native field name found in a PHN state tree."""
+    if isinstance(value, dict):
+        if field in value:
+            return value[field]
+        for nested in value.values():
+            found = _find_native_field(nested, field)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for nested in value:
+            found = _find_native_field(nested, field)
+            if found is not None:
+                return found
+    return None
+
+
+PHN_RECORD_FIELDS = (
+    "flag",
+    "degree_of_completion",
+    "degree_of_completion_week",
+    "phn_plan_id",
+)
+
+
+PHN_TRAINING_PLAN_FIELDS = (
+    "phn_plan_id",
+    "last_update_time",
+    "exercise_day",
+    "training_days",
+    "weekly_high_intensity_day",
+    "current_weekday",
+    "flag_recommended_exercise",
+    "trimp_daily_recommended",
+    "daily_recommend_intensity",
+    "duration_zone1",
+    "duration_zone2",
+    "duration_zone3",
+    "yesterday_recommend_flag",
+    "this_week_achieved_daily_completed_percent",
+)
+
+
+def normalize_phn_record_data(data: Any) -> list[dict[str, Any]]:
+    """Normalize historical PHN/record events without interpreting flag meaning.
+
+    Observed Zepp payloads may store `value.record` as an escaped JSON string.
+    The original complete event payload remains available in `raw_value`.
+    """
+    normalized: list[dict[str, Any]] = []
+    provenance = _provenance(
+        "phn", "record", "confirmed"
+    )
+
+    for event in _event_records(data):
+        payload = _record_payload(event)
+
+        native_record = _decode_json_mapping(
+            payload.get("record")
+        )
+
+        # Some Zepp variants may expose record fields directly.
+        if not native_record:
+            native_record = {
+                field: payload[field]
+                for field in PHN_RECORD_FIELDS
+                if field in payload
+            }
+
+        item: dict[str, Any] = {
+            "date": _record_date(event, payload),
+            "timestamp": _record_timestamp(event, payload),
+            **provenance,
+        }
+
+        for field in PHN_RECORD_FIELDS:
+            value = native_record.get(field)
+            if value is None and field in payload:
+                value = payload.get(field)
+            if value is not None:
+                item[field] = value
+
+        item["raw_value"] = payload
+        item["decoded_record"] = native_record
+        normalized.append(item)
+
+    return normalized
+
+
+def normalize_phn_training_plan_data(
+    data: Any,
+) -> list[dict[str, Any]]:
+    """Normalize PHN/training_plan snapshots.
+
+    `training_plan` is treated as mutable native Coach state. No PHN flag
+    thresholds or training recommendations are recalculated here.
+    """
+    normalized: list[dict[str, Any]] = []
+    provenance = _provenance(
+        "phn", "training_plan", "confirmed"
+    )
+
+    for event in _event_records(data):
+        payload = _record_payload(event)
+
+        result = _decode_json_mapping(
+            payload.get("result")
+        )
+
+        # Captures have shown both nested result JSON and direct mappings.
+        state: Any = result if result else payload
+
+        item: dict[str, Any] = {
+            "date": _record_date(event, payload),
+            "timestamp": _record_timestamp(event, payload),
+            **provenance,
+        }
+
+        for field in PHN_TRAINING_PLAN_FIELDS:
+            value = _find_native_field(state, field)
+            if value is None:
+                value = _find_native_field(payload, field)
+            if value is not None:
+                item[field] = value
+
+        # Production-verified identity contract:
+        # phn/record.phn_plan_id == phn/training_plan event timestamp.
+        #
+        # The mutable result object does not currently expose phn_plan_id,
+        # therefore preserve the native event timestamp as its factual
+        # plan identity fallback.
+        if item.get("phn_plan_id") is None:
+            event_timestamp = item.get("timestamp")
+            if event_timestamp is not None:
+                item["phn_plan_id"] = event_timestamp
+
+        item["raw_value"] = payload
+        item["decoded_result"] = result
+        normalized.append(item)
+
+    return normalized
+
+
+def fetch_current_phn_training_plan(
+    client: ZeppClient,
+    days: int = 30,
+    *,
+    record_limit: int = 2000,
+    plan_limit: int = 50,
+) -> dict[str, Any]:
+    """Resolve the current mutable PHN training plan through latest phn_plan_id.
+
+    Production evidence:
+    - phn/record is ordinary recent history
+    - record.phn_plan_id matches training_plan event.timestamp
+    - training_plan event timestamp can be old/stable
+    - last_update_time inside the plan represents current mutable-state freshness
+    """
+    record_from_ms, record_to_ms = _ms_window(days)
+
+    record_payload = client.events(
+        "phn",
+        "record",
+        record_from_ms,
+        record_to_ms,
+        limit=record_limit,
+        reverse=True,
+    )
+    record_rows = normalize_phn_record_data(record_payload)
+
+    candidates = [
+        row for row in record_rows
+        if row.get("phn_plan_id") is not None
+    ]
+
+    if not candidates:
+        return {
+            "status": "no_plan_identity",
+            "phn_plan_id": None,
+            "payload": {"items": []},
+            "from_ms": record_from_ms,
+            "to_ms": record_to_ms,
+            "record_items": len(record_rows),
+        }
+
+    latest = max(
+        candidates,
+        key=lambda row: (
+            row.get("timestamp") or 0,
+            str(row.get("phn_plan_id")),
+        ),
+    )
+
+    try:
+        plan_id = int(latest["phn_plan_id"])
+    except (TypeError, ValueError):
+        return {
+            "status": "invalid_plan_identity",
+            "phn_plan_id": latest.get("phn_plan_id"),
+            "payload": {"items": []},
+            "from_ms": record_from_ms,
+            "to_ms": record_to_ms,
+            "record_items": len(record_rows),
+        }
+
+    margin_ms = 5 * 60 * 1000
+
+    plan_from_ms = plan_id - margin_ms
+    plan_to_ms = plan_id + margin_ms
+
+    payload = client.events(
+        "phn",
+        "training_plan",
+        plan_from_ms,
+        plan_to_ms,
+        limit=plan_limit,
+        reverse=True,
+    )
+
+    items = payload.get("items") if isinstance(payload, dict) else None
+    items = items if isinstance(items, list) else []
+
+    exact = [
+        item for item in items
+        if isinstance(item, dict)
+        and item.get("timestamp") == plan_id
+    ]
+
+    selected = exact[:1]
+
+    if not selected:
+        candidates_with_ts = [
+            item for item in items
+            if isinstance(item, dict)
+            and isinstance(item.get("timestamp"), (int, float))
+        ]
+        if candidates_with_ts:
+            selected = [
+                min(
+                    candidates_with_ts,
+                    key=lambda item: abs(
+                        int(item["timestamp"]) - plan_id
+                    ),
+                )
+            ]
+
+    return {
+        "status": "ok" if selected else "not_found",
+        "phn_plan_id": plan_id,
+        "payload": {"items": selected},
+        "raw_candidate_count": len(items),
+        "from_ms": plan_from_ms,
+        "to_ms": plan_to_ms,
+        "record_items": len(record_rows),
+    }
+
+
+def cmd_phn_record(args: argparse.Namespace) -> None:
+    """Read-only probe of PHN daily record history."""
+    client = _load_client()
+    from_ms, to_ms = _ms_window(args.days)
+    payload = client.events(
+        "phn",
+        "record",
+        from_ms,
+        to_ms,
+        limit=args.limit,
+    )
+    rows = normalize_phn_record_data(payload)
+
+    if args.json:
+        _emit_json(rows, args)
+        return
+
+    _print_rows(
+        "Zepp PHN daily records",
+        rows,
+        (
+            "date",
+            "flag",
+            "degree_of_completion",
+            "degree_of_completion_week",
+            "phn_plan_id",
+        ),
+    )
+
+
+def cmd_phn_training_plan(args: argparse.Namespace) -> None:
+    """Read-only probe of the current PHN/Zepp Coach training-plan state."""
+    client = _load_client()
+
+    resolved = fetch_current_phn_training_plan(
+        client,
+        args.days,
+        record_limit=max(args.limit, 2000),
+        plan_limit=min(max(args.limit, 1), 200),
+    )
+
+    rows = normalize_phn_training_plan_data(
+        resolved["payload"]
+    )
+
+    if args.json:
+        _emit_json(rows, args)
+        return
+
+    if not rows:
+        print(
+            "No PHN training plan resolved "
+            f"(status={resolved['status']}, "
+            f"plan_id={resolved['phn_plan_id']})."
+        )
+        return
+
+    _print_rows(
+        "Zepp PHN training-plan snapshots",
+        rows,
+        (
+            "date",
+            "phn_plan_id",
+            "exercise_day",
+            "current_weekday",
+            "flag_recommended_exercise",
+            "trimp_daily_recommended",
+            "daily_recommend_intensity",
+            "yesterday_recommend_flag",
+        ),
+    )
+
+
+def sync_phn_domains(
+    client: ZeppClient,
+    database: Database,
+    days: int,
+    *,
+    limit: int = 2000,
+) -> dict[str, Any]:
+    """Opt-in PHN synchronization.
+
+    PHN is intentionally not part of the default sync-domain set until the
+    current Zepp backend GET behavior is live-validated.
+    """
+    from_ms, to_ms = _ms_window(days)
+
+    specs = (
+        (
+            "phn_record",
+            "phn",
+            "record",
+            normalize_phn_record_data,
+        ),
+        (
+            "phn_training_plan",
+            "phn",
+            "training_plan",
+            normalize_phn_training_plan_data,
+        ),
+    )
+
+    results: list[dict[str, Any]] = []
+
+    for domain, event_type, sub_type, normalizer in specs:
+        try:
+            domain_from_ms = from_ms
+            domain_to_ms = to_ms
+
+            if domain == "phn_training_plan":
+                resolved = fetch_current_phn_training_plan(
+                    client,
+                    days,
+                    record_limit=limit,
+                    plan_limit=50,
+                )
+                payload = resolved["payload"]
+                domain_from_ms = resolved["from_ms"]
+                domain_to_ms = resolved["to_ms"]
+            else:
+                payload = client.events(
+                    event_type,
+                    sub_type,
+                    from_ms,
+                    to_ms,
+                    limit=limit,
+                )
+
+            rows = normalizer(payload)
+
+            counts = database.store_domain_with_raw(
+                domain,
+                event_type,
+                sub_type,
+                payload,
+                domain_from_ms,
+                domain_to_ms,
+                rows,
+            )
+
+            results.append({
+                "domain": domain,
+                "event_type": event_type,
+                "sub_type": sub_type,
+                "status": "ok" if rows else "empty",
+                "records_retrieved": len(rows),
+                **counts,
+            })
+        except Exception as exc:
+            results.append({
+                "domain": domain,
+                "event_type": event_type,
+                "sub_type": sub_type,
+                "status": "error",
+                "records_retrieved": 0,
+                "inserted": 0,
+                "updated": 0,
+                "unchanged": 0,
+                "error": type(exc).__name__,
+            })
+
+    statuses = {row["status"] for row in results}
+    overall = (
+        "ok"
+        if statuses <= {"ok", "empty"}
+        else "partial"
+        if "ok" in statuses or "empty" in statuses
+        else "error"
+    )
+
+    return {
+        "status": overall,
+        "requested_days": days,
+        "domains": results,
+    }
+
+
+def cmd_sync_phn(args: argparse.Namespace) -> None:
+    database = Database(_db_path_from_args(args))
+    try:
+        result = sync_phn_domains(
+            _load_client(),
+            database,
+            args.days,
+            limit=args.limit,
+        )
+    finally:
+        database.close()
+
+    if args.json:
+        _emit_json(result, args)
+        return
+
+    print(
+        f"PHN synchronization: "
+        f"{result['status']} ({result['requested_days']} days)"
+    )
+    for domain in result["domains"]:
+        print(
+            f"  {domain['domain']}: {domain['status']} "
+            f"retrieved={domain['records_retrieved']} "
+            f"inserted={domain['inserted']} "
+            f"updated={domain['updated']} "
+            f"unchanged={domain['unchanged']}"
+            + (
+                f" error={domain['error']}"
+                if domain.get("error")
+                else ""
+            )
+        )
+
+
 def cmd_lifeload(args: argparse.Namespace) -> None:
     c = _load_client()
     from_ms, to_ms = _ms_window(args.days)
@@ -5465,6 +5947,37 @@ def main() -> None:
             default=argparse.SUPPRESS,
             help="SQLite database path (overrides config/env/default)",
         )
+
+    sp = sub.add_parser(
+        "phn-record",
+        help="Read-only Zepp Coach PHN daily record probe",
+    )
+    _add_days(sp)
+    _add_json(sp)
+    sp.add_argument("--limit", type=int, default=2000)
+    sp.set_defaults(func=cmd_phn_record)
+
+    sp = sub.add_parser(
+        "phn-training-plan",
+        help="Read-only Zepp Coach PHN training-plan state probe",
+    )
+    _add_days(sp)
+    _add_json(sp)
+    sp.add_argument("--limit", type=int, default=200)
+    sp.set_defaults(func=cmd_phn_training_plan)
+
+    sp = sub.add_parser(
+        "sync-phn",
+        help=(
+            "Opt-in PHN synchronization; kept separate from sync-db "
+            "until live GET behavior is validated"
+        ),
+    )
+    _add_days(sp)
+    _add_json(sp)
+    _add_db(sp)
+    sp.add_argument("--limit", type=int, default=2000)
+    sp.set_defaults(func=cmd_sync_phn)
 
     sp = sub.add_parser("sport-load", help="Daily training load (WatchSportStatistics)")
     _add_days(sp)

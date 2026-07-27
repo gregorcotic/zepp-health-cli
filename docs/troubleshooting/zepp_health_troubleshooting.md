@@ -371,3 +371,44 @@ Keep the pre-C018.2 backup until the normal retention period expires. If a
 post-repair integrity or value check ever fails, stop synchronization and use
 the documented `db-restore` workflow to a separate path first; do not overwrite
 the production database without a separately reviewed recovery action.
+
+
+## Same raw payload but stale normalized columns
+
+### Symptom
+
+A parser/normalizer is corrected, but a subsequent synchronization reports:
+
+`unchanged`
+
+and previously stored normalized columns remain stale.
+
+### Root cause
+
+Older generic UPSERT behavior classified a record as unchanged when
+`source_json` matched, without checking whether normalization now produced
+different persisted columns.
+
+This appeared during PHN Batch 1B after the native relationship
+
+`phn/record.phn_plan_id == phn/training_plan.timestamp`
+
+was production-proven and the training-plan normalizer began deriving the
+previously missing `phn_plan_id`.
+
+The raw Zepp payload had not changed, so the old UPSERT skipped the corrected
+normalized value.
+
+### Fix
+
+Generic domain persistence now compares both raw source JSON and every
+normalized persisted column.
+
+Identical raw evidence with corrected normalized output is classified as
+`updated`.
+
+### Lesson
+
+Never use raw-payload equality alone as the definition of canonical database
+equality. Historical native evidence must remain re-normalizable after parser
+improvements.

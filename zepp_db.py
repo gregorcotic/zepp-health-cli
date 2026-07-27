@@ -18,7 +18,7 @@ from typing import Any, Iterator
 from zoneinfo import ZoneInfo
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 DEFAULT_DB_PATH = Path("data") / "zepp_health.db"
 _REMOVED_KEYS = {
     "app_token", "apptoken", "authorization", "cookie", "cookies",
@@ -37,6 +37,7 @@ FRESHNESS_DOMAINS = {
     "sleep_related_readiness": "sleep_related_readiness",
     "wake_energy": "wake_energy",
     "exertion": "exertion_records",
+    "phn_record": "phn_daily_records",
 }
 MORNING_RECOVERY_DOMAINS = (
     "hrv",
@@ -71,6 +72,45 @@ def db_value(value: Any) -> Any:
     if isinstance(value, (dict, list)):
         return json_text(value)
     return value
+
+
+def _stored_value_equivalent(
+    stored: Any,
+    incoming: Any,
+) -> bool:
+    """Compare a normalized value with its SQLite stored representation.
+
+    The same canonical value can cross the SQLite boundary with a different
+    Python type because table affinity may store numeric native Zepp values in
+    TEXT columns. Containers are already serialized through db_value().
+
+    This helper compares the value that would be persisted, not the original
+    Python representation.
+    """
+    incoming_db = db_value(incoming)
+
+    if stored is None or incoming_db is None:
+        return stored is None and incoming_db is None
+
+    # TEXT-affinity columns are returned by sqlite3 as str.
+    if isinstance(stored, str):
+        return stored == str(incoming_db)
+
+    # INTEGER columns.
+    if isinstance(stored, int) and not isinstance(stored, bool):
+        try:
+            return stored == int(incoming_db)
+        except (TypeError, ValueError, OverflowError):
+            return False
+
+    # REAL columns.
+    if isinstance(stored, float):
+        try:
+            return stored == float(incoming_db)
+        except (TypeError, ValueError, OverflowError):
+            return False
+
+    return stored == incoming_db
 
 
 def logical_key(*values: Any) -> str:
@@ -489,6 +529,50 @@ ALTER TABLE exertion_records ADD COLUMN exercise_plan_hr_upper TEXT;
 """
 
 
+
+SCHEMA_V6_SQL = """
+CREATE TABLE IF NOT EXISTS phn_daily_records (
+    record_key TEXT PRIMARY KEY,
+    event_date TEXT,
+    timestamp_ms INTEGER,
+    phn_plan_id TEXT,
+    flag TEXT,
+    degree_of_completion TEXT,
+    degree_of_completion_week TEXT,
+    source_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_phn_daily_date
+    ON phn_daily_records(event_date);
+
+CREATE TABLE IF NOT EXISTS phn_training_plans (
+    record_key TEXT PRIMARY KEY,
+    event_date TEXT,
+    timestamp_ms INTEGER,
+    phn_plan_id TEXT,
+    last_update_time TEXT,
+    exercise_day TEXT,
+    training_days_json TEXT,
+    weekly_high_intensity_day_json TEXT,
+    current_weekday TEXT,
+    flag_recommended_exercise TEXT,
+    trimp_daily_recommended TEXT,
+    daily_recommend_intensity TEXT,
+    duration_zone1 TEXT,
+    duration_zone2 TEXT,
+    duration_zone3 TEXT,
+    yesterday_recommend_flag TEXT,
+    this_week_achieved_daily_completed_percent_json TEXT,
+    source_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_phn_training_plan_date
+    ON phn_training_plans(event_date);
+"""
+
+
 class Database:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path).expanduser()
@@ -560,6 +644,15 @@ class Database:
                     "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('schema_version', '5')"
                 )
                 self.connection.execute("PRAGMA user_version = 5")
+                current = 5
+            if current < 6:
+                self.connection.executescript(SCHEMA_V6_SQL)
+                self.connection.execute(
+                    "INSERT OR REPLACE INTO schema_meta(key, value) "
+                    "VALUES ('schema_version', '6')"
+                )
+                self.connection.execute("PRAGMA user_version = 6")
+                current = 6
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -669,24 +762,66 @@ class Database:
         columns: tuple[str, ...],
     ) -> str:
         key = row["record_key"]
+
+        selected_columns = ("source_json", *columns)
         existing = self.connection.execute(
-            f"SELECT source_json FROM {table} WHERE record_key=?", (key,)
+            f"SELECT {','.join(selected_columns)} "
+            f"FROM {table} WHERE record_key=?",
+            (key,),
         ).fetchone()
+
         raw = json_text(row.get("source_json", row))
+
         if existing is None:
-            values = [key] + [db_value(row.get(column)) for column in columns] + [raw, utc_now()]
-            names = ["record_key", *columns, "source_json", "updated_at"]
+            values = (
+                [key]
+                + [db_value(row.get(column)) for column in columns]
+                + [raw, utc_now()]
+            )
+            names = [
+                "record_key",
+                *columns,
+                "source_json",
+                "updated_at",
+            ]
             placeholders = ",".join("?" for _ in names)
             self.connection.execute(
-                f"INSERT INTO {table} ({','.join(names)}) VALUES ({placeholders})", values
+                f"INSERT INTO {table} ({','.join(names)}) "
+                f"VALUES ({placeholders})",
+                values,
             )
             return "inserted"
-        if existing["source_json"] == raw:
+
+        normalized_unchanged = all(
+            _stored_value_equivalent(
+                existing[column],
+                row.get(column),
+            )
+            for column in columns
+        )
+
+        if (
+            existing["source_json"] == raw
+            and normalized_unchanged
+        ):
             return "unchanged"
-        assignments = ",".join(f"{column}=?" for column in (*columns, "source_json", "updated_at"))
-        values = [db_value(row.get(column)) for column in columns] + [raw, utc_now(), key]
+
+        assignments = ",".join(
+            f"{column}=?"
+            for column in (
+                *columns,
+                "source_json",
+                "updated_at",
+            )
+        )
+        values = (
+            [db_value(row.get(column)) for column in columns]
+            + [raw, utc_now(), key]
+        )
         self.connection.execute(
-            f"UPDATE {table} SET {assignments} WHERE record_key=?", values
+            f"UPDATE {table} SET {assignments} "
+            f"WHERE record_key=?",
+            values,
         )
         return "updated"
 
@@ -1200,7 +1335,7 @@ class Database:
         tables = (
             "hrv_samples", "hrv_daily", "wake_energy", "exertion_records",
             "readiness_records", "sleep_related_readiness", "charge_records",
-            "insight_records", "lifeload_records", "raw_payloads", "sync_runs",
+            "insight_records", "lifeload_records", "phn_daily_records", "phn_training_plans", "raw_payloads", "sync_runs",
         )
         counts = {
             table: int(self.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
@@ -1297,6 +1432,91 @@ class Database:
         else:
             morning_status = "pending"
 
+        # PHN training_plan is a persistent mutable Coach object.
+        # Its event timestamp identifies the plan; current freshness comes
+        # from native last_update_time.
+        phn_plan_row = self.connection.execute(
+            """SELECT phn_plan_id,
+                      timestamp_ms,
+                      last_update_time
+               FROM phn_training_plans
+               ORDER BY
+                   CASE
+                       WHEN last_update_time IS NULL THEN 0
+                       ELSE CAST(last_update_time AS INTEGER)
+                   END DESC,
+                   timestamp_ms DESC
+               LIMIT 1"""
+        ).fetchone()
+
+        phn_plan_state = {
+            "supported": True,
+            "phn_plan_id": None,
+            "event_timestamp_ms": None,
+            "last_update_time": None,
+            "last_update_at": None,
+            "last_update_local_date": None,
+            "coverage": "unavailable",
+        }
+
+        if phn_plan_row is not None:
+            phn_plan_state["phn_plan_id"] = (
+                phn_plan_row["phn_plan_id"]
+            )
+            phn_plan_state["event_timestamp_ms"] = (
+                phn_plan_row["timestamp_ms"]
+            )
+            phn_plan_state["last_update_time"] = (
+                phn_plan_row["last_update_time"]
+            )
+
+            raw_update = _number_or_none(
+                phn_plan_row["last_update_time"]
+            )
+
+            if isinstance(raw_update, (int, float)):
+                # Production PHN last_update_time is epoch seconds.
+                # Be defensive if milliseconds ever appear.
+                epoch_seconds = (
+                    raw_update / 1000
+                    if raw_update > 10_000_000_000
+                    else raw_update
+                )
+
+                try:
+                    updated = datetime.fromtimestamp(
+                        epoch_seconds,
+                        tz=timezone.utc,
+                    )
+                    updated_local = updated.astimezone(
+                        local_zone
+                    )
+
+                    local_date = (
+                        updated_local.date().isoformat()
+                    )
+
+                    phn_plan_state["last_update_at"] = (
+                        updated.isoformat()
+                    )
+                    phn_plan_state[
+                        "last_update_local_date"
+                    ] = local_date
+
+                    if local_date == today:
+                        phn_plan_state["coverage"] = "today"
+                    elif local_date == yesterday:
+                        phn_plan_state["coverage"] = "yesterday"
+                    else:
+                        phn_plan_state["coverage"] = "other"
+
+                except (
+                    OverflowError,
+                    OSError,
+                    ValueError,
+                ):
+                    pass
+
         return {
             "timezone": timezone_name,
             "as_of": local_now.isoformat(),
@@ -1313,6 +1533,7 @@ class Database:
                 "synchronized_today": latest_success_local_date == today,
             },
             "domain_data_freshness": domains,
+            "phn_training_plan_state": phn_plan_state,
             "morning_recovery_domains": list(MORNING_RECOVERY_DOMAINS),
             "morning_data_status": morning_status,
         }
@@ -1345,6 +1566,7 @@ class Database:
             ("charge", "charge_records", "COALESCE(sample_timestamp_ms, timestamp_ms)"),
             ("insights", "insight_records", "COALESCE(timestamp_ms, start_time_ms)"),
             ("lifeload", "lifeload_records", "timestamp_ms"),
+            ("phn_record", "phn_daily_records", "timestamp_ms"),
         )
         selected_fields = {
             "wake_energy": ("bio_charge_wake", "wake_charge", "physical_wake", "mental_wake", "daily_fitness_score", "stress_fitness_score", "exertion_score"),
@@ -1368,10 +1590,20 @@ class Database:
             "readiness": ("status", "hrv_score", "sleep_hrv", "rhr_score", "sleep_rhr", "phy_score", "ment_score", "skin_temp_score", "ahi_score", "rdns_score"),
             "sleep_related_readiness": ("sleep_hrv", "sleep_rhr", "ahi_score", "ahi_baseline", "rdns_score"),
             "lifeload": ("life_load",),
+            "phn_record": (
+                "phn_plan_id",
+                "flag",
+                "degree_of_completion",
+                "degree_of_completion_week",
+            ),
         }
         output_names = {
             "bio_charge_wake": "bioChargeWake", "wake_charge": "wakeCharge", "physical_wake": "physicalWake", "mental_wake": "mentalWake", "daily_fitness_score": "dailyFitnessScore", "stress_fitness_score": "stressFitnessScore", "exertion_score": "exertionScore",
             "recovery_factor": "recoveryFactor", "recovery_factor_id": "recoveryFactorID", "total_score": "totalScore", "activity_score": "activityScore", "exercise_score": "exerciseScore", "target_score": "targetScore", "completion_percent": "completionPercent", "atl": "atl", "ctl": "ctl", "tsb": "tsb", "insight_state": "insightState", "exercise_plan_intensity": "exercise_plan_intensity", "exercise_plan_duration": "exercise_plan_duration", "exercise_plan_hr_lower": "exercise_plan_hr_lower", "exercise_plan_hr_upper": "exercise_plan_hr_upper", "status": "status", "hrv_score": "hrvScore", "sleep_hrv": "sleepHRV", "rhr_score": "rhrScore", "sleep_rhr": "sleepRHR", "phy_score": "phyScore", "ment_score": "mentScore", "skin_temp_score": "skinTempScore", "ahi_score": "ahiScore", "ahi_baseline": "ahiBaseline", "rdns_score": "rdnsScore", "life_load": "lifeLoad",
+            "phn_plan_id": "phn_plan_id",
+            "flag": "flag",
+            "degree_of_completion": "degree_of_completion",
+            "degree_of_completion_week": "degree_of_completion_week",
         }
         for name, table, order_by in specs:
             query = f"SELECT * FROM {table} WHERE event_date BETWEEN ? AND ? ORDER BY event_date, {order_by}"
@@ -1400,7 +1632,7 @@ def inspect_database_file(path: str | Path) -> dict[str, Any]:
         tables = [
             "hrv_samples", "hrv_daily", "wake_energy", "exertion_records",
             "readiness_records", "sleep_related_readiness", "charge_records",
-            "insight_records", "lifeload_records", "raw_payloads", "sync_runs",
+            "insight_records", "lifeload_records", "phn_daily_records", "phn_training_plans", "raw_payloads", "sync_runs",
             "sync_run_domains",
             "activities", "activity_summary_metrics", "activity_streams",
             "activity_samples", "activity_laps", "activity_notes",
@@ -1520,7 +1752,26 @@ def _domain_rows(domain: str, rows: list[dict[str, Any]]) -> list[tuple[str, lis
             row["record_key"] = logical_key("lifeload", row.get("date"), row.get("timestamp"), row.get("start_time"))
             now_rows.append(row)
         elif domain == "sleep_related_readiness":
-            row["record_key"] = logical_key("sleep_readiness", row.get("date"), row.get("timestamp"), row.get("timestampUpdate"))
+            row["record_key"] = logical_key(
+                "sleep_readiness",
+                row.get("date"),
+                row.get("timestamp"),
+                row.get("timestampUpdate"),
+            )
+            now_rows.append(row)
+        elif domain == "phn_record":
+            row["record_key"] = logical_key(
+                "phn_record",
+                row.get("date"),
+                row.get("phn_plan_id"),
+            )
+            now_rows.append(row)
+        elif domain == "phn_training_plan":
+            # Observed as mutable Zepp Coach plan state.
+            row["record_key"] = logical_key(
+                "phn_training_plan",
+                row.get("phn_plan_id") or row.get("timestamp"),
+            )
             now_rows.append(row)
     columns = {
         "hrv": ("event_date", "timestamp_ms", "start_time_ms", "offset_ms", "hrv", "raw_u"),
@@ -1548,13 +1799,67 @@ def _domain_rows(domain: str, rows: list[dict[str, Any]]) -> list[tuple[str, lis
         "charge": ("event_date", "timestamp_ms", "start_time_ms", "sample_timestamp_ms", "offset_ms", "end_offset_ms", "total", "physical", "mental", "raw_u"),
         "insights": ("event_date", "timestamp_ms", "start_time_ms", "insight_id", "insight", "type", "diff", "slope", "start_offset_ms", "end_offset_ms", "track_id", "threshold", "raw_u", "parsed_json_extra"),
         "sleep_related_readiness": ("event_date", "timestamp_ms", "timestamp_update_ms", "sleep_hrv", "sleep_rhr", "ahi_score", "ahi_baseline", "rdns_score"),
-        "lifeload": ("event_date", "timestamp_ms", "start_time_ms", "life_load"),
+        "lifeload": (
+            "event_date",
+            "timestamp_ms",
+            "start_time_ms",
+            "life_load",
+        ),
+        "phn_record": (
+            "event_date",
+            "timestamp_ms",
+            "phn_plan_id",
+            "flag",
+            "degree_of_completion",
+            "degree_of_completion_week",
+        ),
+        "phn_training_plan": (
+            "event_date",
+            "timestamp_ms",
+            "phn_plan_id",
+            "last_update_time",
+            "exercise_day",
+            "training_days_json",
+            "weekly_high_intensity_day_json",
+            "current_weekday",
+            "flag_recommended_exercise",
+            "trimp_daily_recommended",
+            "daily_recommend_intensity",
+            "duration_zone1",
+            "duration_zone2",
+            "duration_zone3",
+            "yesterday_recommend_flag",
+            "this_week_achieved_daily_completed_percent_json",
+        ),
     }[domain]
     converted: list[dict[str, Any]] = []
     for row in now_rows:
         converted_row = dict(row)
         aliases = {
-            "event_date": "date", "timestamp_ms": "timestamp", "start_time_ms": "start_time", "offset_ms": "s", "sample_timestamp_ms": "sample_timestamp", "end_offset_ms": "e", "bio_charge_wake": "bioChargeWake", "wake_charge": "wakeCharge", "physical_wake": "physicalWake", "mental_wake": "mentalWake", "daily_fitness_score": "dailyFitnessScore", "stress_fitness_score": "stressFitnessScore", "exertion_score": "exertionScore", "recovery_factor": "recoveryFactor", "recovery_factor_id": "recoveryFactorID", "total_score": "totalScore", "activity_score": "activityScore", "exercise_score": "exerciseScore", "target_score": "targetScore", "completion_percent": "completionPercent", "insight_state": "insightState", "exercise_plan_intensity": "exercise_plan_intensity", "exercise_plan_duration": "exercise_plan_duration", "exercise_plan_hr_lower": "exercise_plan_hr_lower", "exercise_plan_hr_upper": "exercise_plan_hr_upper", "timestamp_update_ms": "timestampUpdate", "hrv_score": "hrvScore", "sleep_hrv": "sleepHRV", "rhr_score": "rhrScore", "sleep_rhr": "sleepRHR", "phy_score": "phyScore", "ment_score": "mentScore", "skin_temp_score": "skinTempScore", "ahi_score": "ahiScore", "ahi_baseline": "ahiBaseline", "rdns_score": "rdnsScore", "life_load": "lifeLoad", "insight_id": "insight_id", "track_id": "track_id", "threshold": "threshold", "parsed_json_extra": "parsed_json_extra", "raw_u": "raw_u",
+            "event_date": "date", "timestamp_ms": "timestamp", "start_time_ms": "start_time", "offset_ms": "s", "sample_timestamp_ms": "sample_timestamp", "end_offset_ms": "e", "bio_charge_wake": "bioChargeWake", "wake_charge": "wakeCharge", "physical_wake": "physicalWake", "mental_wake": "mentalWake", "daily_fitness_score": "dailyFitnessScore", "stress_fitness_score": "stressFitnessScore", "exertion_score": "exertionScore", "recovery_factor": "recoveryFactor", "recovery_factor_id": "recoveryFactorID", "total_score": "totalScore", "activity_score": "activityScore", "exercise_score": "exerciseScore", "target_score": "targetScore", "completion_percent": "completionPercent", "insight_state": "insightState", "exercise_plan_intensity": "exercise_plan_intensity", "exercise_plan_duration": "exercise_plan_duration", "exercise_plan_hr_lower": "exercise_plan_hr_lower", "exercise_plan_hr_upper": "exercise_plan_hr_upper", "timestamp_update_ms": "timestampUpdate", "hrv_score": "hrvScore", "sleep_hrv": "sleepHRV", "rhr_score": "rhrScore", "sleep_rhr": "sleepRHR", "phy_score": "phyScore", "ment_score": "mentScore", "skin_temp_score": "skinTempScore", "ahi_score": "ahiScore", "ahi_baseline": "ahiBaseline", "rdns_score": "rdnsScore", "life_load": "lifeLoad",
+            "phn_plan_id": "phn_plan_id",
+            "flag": "flag",
+            "degree_of_completion": "degree_of_completion",
+            "degree_of_completion_week": "degree_of_completion_week",
+            "last_update_time": "last_update_time",
+            "exercise_day": "exercise_day",
+            "training_days_json": "training_days",
+            "weekly_high_intensity_day_json":
+                "weekly_high_intensity_day",
+            "current_weekday": "current_weekday",
+            "flag_recommended_exercise":
+                "flag_recommended_exercise",
+            "trimp_daily_recommended":
+                "trimp_daily_recommended",
+            "daily_recommend_intensity":
+                "daily_recommend_intensity",
+            "duration_zone1": "duration_zone1",
+            "duration_zone2": "duration_zone2",
+            "duration_zone3": "duration_zone3",
+            "yesterday_recommend_flag":
+                "yesterday_recommend_flag",
+            "this_week_achieved_daily_completed_percent_json":
+                "this_week_achieved_daily_completed_percent", "insight_id": "insight_id", "track_id": "track_id", "threshold": "threshold", "parsed_json_extra": "parsed_json_extra", "raw_u": "raw_u",
         }
         for target, source in aliases.items():
             converted_row[target] = row.get(source)
@@ -1563,4 +1868,15 @@ def _domain_rows(domain: str, rows: list[dict[str, Any]]) -> list[tuple[str, lis
 
 
 def domain_table(domain: str) -> str:
-    return {"hrv": "hrv_samples", "wake_energy": "wake_energy", "exertion": "exertion_records", "readiness": "readiness_records", "charge": "charge_records", "insights": "insight_records", "sleep_related_readiness": "sleep_related_readiness", "lifeload": "lifeload_records"}[domain]
+    return {
+        "hrv": "hrv_samples",
+        "wake_energy": "wake_energy",
+        "exertion": "exertion_records",
+        "readiness": "readiness_records",
+        "charge": "charge_records",
+        "insights": "insight_records",
+        "sleep_related_readiness": "sleep_related_readiness",
+        "lifeload": "lifeload_records",
+        "phn_record": "phn_daily_records",
+        "phn_training_plan": "phn_training_plans",
+    }[domain]

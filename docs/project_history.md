@@ -404,3 +404,50 @@ successful.
 Safe status and inspection commands omit coordinates, raw samples, native
 source values, and Notes text by default. Existing health tables and freshness
 semantics remain unchanged. C017 remains paused.
+
+## Z002 — Legacy ZeppAiAgent audit and evidence registry
+
+A structured audit of the earlier `ZeppAiAgent` research project was performed
+before extending the current collector. Verified findings, disproven hypotheses,
+open questions, sport mappings, PHN/Zepp Coach behavior, Exertion semantics,
+Food/calorie findings and the remaining audit backlog are now maintained in
+`docs/legacy_zepp_audit.md`.
+
+The audit established a standing rule: do not repeat reverse engineering that is
+already recorded there, and do not promote candidate meanings to production
+semantics without evidence. Raw Zepp-native values remain the source of truth.
+
+Batch 1A extended Exertion end-to-end and was validated by unit tests and live
+production data (`2517ae8`). Batch 1B is the PHN / Zepp Coach gap; repository
+search confirmed no current PHN implementation.
+
+
+## Z002.1 — Native PHN / Zepp Coach integration
+
+Completed Batch 1B and production-validated first-class native PHN support.
+
+`phn/record` provides historical daily Coach state. `phn/training_plan` is a
+persistent mutable Coach plan whose event timestamp is its stable identity and
+matches the `phn_plan_id` carried by daily records. Its current factual
+freshness is derived from native `last_update_time`.
+
+SQLite schema v6 stores PHN daily records and the current training-plan state.
+The implementation preserves raw native values and does not invent semantics
+for unresolved PHN codes.
+
+Production history additionally disproved the earlier interpretation of
+51/61/62 as simple completion-percentage buckets.
+
+### Historical re-normalization rule
+
+The Batch 1B rollout exposed an important generic persistence issue: an
+unchanged raw payload can produce corrected normalized fields after a parser
+improvement.
+
+Domain UPSERT behavior was therefore changed so that `unchanged` requires both
+the raw source payload and every persisted normalized column to be equivalent.
+
+If the raw payload is identical but normalization has changed, the row is
+classified as `updated` and the corrected canonical fields are persisted.
+
+This rule applies to all native health domains, not only PHN.

@@ -135,3 +135,50 @@ compares schema version and table counts after restore. Keep backups private.
 A practical manual retention policy is daily backups for 7 days, weekly
 backups for 4 weeks, and monthly backups for 6 months; deletion is not
 automated by this project.
+
+
+## PHN / Zepp Coach persistence
+
+SQLite schema v6 adds:
+
+### `phn_daily_records`
+
+Historical daily Zepp Coach state.
+
+Important normalized fields:
+
+- `event_date`
+- `timestamp_ms`
+- `phn_plan_id`
+- `flag`
+- `degree_of_completion`
+- `degree_of_completion_week`
+- sanitized `source_json`
+
+### `phn_training_plans`
+
+Persistent mutable Zepp Coach plan state.
+
+The native training-plan event timestamp represents the stable plan identity.
+Current-state freshness is determined from native `last_update_time`.
+
+### UPSERT equivalence rule
+
+A domain row is `unchanged` only when BOTH are equivalent:
+
+- sanitized native `source_json`
+- every persisted normalized column
+
+This is intentional. Parser/normalizer improvements must be able to refresh
+canonical columns from identical historical raw evidence.
+
+Therefore:
+
+raw unchanged + normalized unchanged
+→ `unchanged`
+
+raw unchanged + normalized changed
+→ `updated`
+
+raw changed
+→ `updated`

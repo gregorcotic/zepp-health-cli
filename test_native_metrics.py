@@ -8,11 +8,14 @@ from zepp_health import (
     consolidate_daily_status,
     diagnose_wake_energy_payload,
     discover_event_domains,
+    fetch_current_phn_training_plan,
     latest_readiness_per_day,
     normalize_charge_data,
     normalize_exertion_data,
     normalize_hrv_data,
     normalize_readiness_data,
+    normalize_phn_record_data,
+    normalize_phn_training_plan_data,
     normalize_wake_data,
     _normalize_value_records,
 )
@@ -293,6 +296,183 @@ class NativeMetricsTests(unittest.TestCase):
         )
         self.assertEqual(life[0]["lifeLoad"], 65)
         self.assertEqual(life[0]["mapping_confidence"], "candidate")
+
+    def test_phn_record_decodes_embedded_record_json(self) -> None:
+        payload = {
+            "items": [{
+                "date": "2026-05-18",
+                "timestamp": 1779055200000,
+                "value": {
+                    "record": json.dumps({
+                        "flag": 62,
+                        "degree_of_completion": 153,
+                        "degree_of_completion_week": 30,
+                        "phn_plan_id": "1769457413483",
+                        "future_native_field": 99,
+                    }),
+                    "future_wrapper_field": "preserved",
+                },
+            }]
+        }
+
+        rows = normalize_phn_record_data(payload)
+
+        self.assertEqual(rows[0]["flag"], 62)
+        self.assertEqual(
+            rows[0]["degree_of_completion"], 153
+        )
+        self.assertEqual(
+            rows[0]["degree_of_completion_week"], 30
+        )
+        self.assertEqual(
+            rows[0]["phn_plan_id"], "1769457413483"
+        )
+        self.assertEqual(
+            rows[0]["decoded_record"]["future_native_field"],
+            99,
+        )
+
+
+    def test_phn_training_plan_preserves_native_state(self) -> None:
+        payload = {
+            "items": [{
+                "date": "2026-05-28",
+                "timestamp": 1779946620000,
+                "value": {
+                    "result": json.dumps({
+                        "phn_plan_id": "1769457413483",
+                        "last_update_time": 1779946620,
+                        "current_weekday": 3,
+                        "flag_recommended_exercise": 31,
+                        "trimp_daily_recommended": 0,
+                        "daily_recommend_intensity": 0,
+                        "duration_zone1": 0,
+                        "duration_zone2": 0,
+                        "duration_zone3": 0,
+                        "yesterday_recommend_flag": 61,
+                        "this_week_achieved_daily_completed_percent":
+                            [81, 0, 121, 0, 0, 0, 0],
+                        "setting": {
+                            "exercise_day": 53,
+                            "training_days": [0, 2, 4, 5],
+                            "weekly_high_intensity_day":
+                                [2, 0, 1, 0, 3, 1, 0],
+                        },
+                    }),
+                },
+            }]
+        }
+
+        row = normalize_phn_training_plan_data(payload)[0]
+
+        self.assertEqual(row["exercise_day"], 53)
+        self.assertEqual(
+            row["training_days"], [0, 2, 4, 5]
+        )
+        self.assertEqual(
+            row["weekly_high_intensity_day"],
+            [2, 0, 1, 0, 3, 1, 0],
+        )
+        self.assertEqual(
+            row["flag_recommended_exercise"], 31
+        )
+        self.assertEqual(
+            row["yesterday_recommend_flag"], 61
+        )
+        # Preserve an explicit native phn_plan_id when Zepp provides one.
+        # event.timestamp is only the fallback identity when the native field
+        # is absent.
+        self.assertEqual(
+            row["phn_plan_id"],
+            "1769457413483",
+        )
+
+
+    def test_phn_training_plan_resolves_from_latest_record_plan_id(
+        self,
+    ) -> None:
+        plan_id = 1769457413483
+
+        class FakePHNClient:
+            def events(
+                self,
+                event_type,
+                sub_type,
+                from_ms,
+                to_ms,
+                *,
+                limit=2000,
+                reverse=True,
+            ):
+                if (event_type, sub_type) == ("phn", "record"):
+                    return {
+                        "items": [{
+                            "timestamp": 1785000000000,
+                            "value": {
+                                "phn_plan_id": plan_id,
+                                "record": json.dumps({
+                                    "flag": 31,
+                                    "degree_of_completion": 0,
+                                }),
+                            },
+                        }]
+                    }
+
+                if (
+                    event_type,
+                    sub_type
+                ) == ("phn", "training_plan"):
+                    return {
+                        "items": [
+                            {
+                                "timestamp": plan_id - 75070,
+                                "value": {
+                                    "result": json.dumps({
+                                        "current_weekday": 0,
+                                    }),
+                                },
+                            },
+                            {
+                                "timestamp": plan_id,
+                                "value": {
+                                    "result": json.dumps({
+                                        "exercise_day": 53,
+                                        "last_update_time":
+                                            1785175737,
+                                    }),
+                                },
+                            },
+                        ]
+                    }
+
+                raise AssertionError(
+                    (event_type, sub_type)
+                )
+
+        resolved = fetch_current_phn_training_plan(
+            FakePHNClient(),
+            30,
+        )
+
+        self.assertEqual(
+            resolved["status"],
+            "ok",
+        )
+        self.assertEqual(
+            resolved["phn_plan_id"],
+            plan_id,
+        )
+
+        rows = normalize_phn_training_plan_data(
+            resolved["payload"]
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(
+            rows[0]["timestamp"],
+            plan_id,
+        )
+
 
     def test_charge_real_data_preserves_sample_resolution(self) -> None:
         rows = normalize_charge_data({"items": [{

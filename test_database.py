@@ -146,6 +146,115 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(before_morning["domain_data_freshness"]["hrv"]["coverage"], "today")
             db.close()
 
+    def test_phn_record_is_exposed_in_factual_freshness(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Database(Path(directory) / "zepp.db")
+
+            db.store_domain_rows(
+                "phn_record",
+                [{
+                    "date": "2026-07-27",
+                    "timestamp": 1785170000000,
+                    "phn_plan_id": "1769457413483",
+                    "flag": 41,
+                    "degree_of_completion": 0,
+                    "degree_of_completion_week": 0,
+                    "raw_value": {
+                        "record": "native"
+                    },
+                }],
+            )
+
+            fresh = db.factual_freshness(
+                datetime(
+                    2026,
+                    7,
+                    27,
+                    7,
+                    0,
+                    tzinfo=timezone.utc,
+                )
+            )
+
+            state = fresh[
+                "domain_data_freshness"
+            ]["phn_record"]
+
+            self.assertTrue(state["supported"])
+            self.assertEqual(
+                state["latest_date"],
+                "2026-07-27",
+            )
+            self.assertEqual(
+                state["coverage"],
+                "today",
+            )
+
+            db.close()
+
+
+    def test_phn_training_plan_freshness_uses_last_update_time(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Database(Path(directory) / "zepp.db")
+
+            updated = datetime(
+                2026,
+                7,
+                27,
+                6,
+                0,
+                tzinfo=timezone.utc,
+            )
+
+            db.store_domain_rows(
+                "phn_training_plan",
+                [{
+                    "date": "2026-01-26",
+                    "timestamp": 1769457413483,
+                    "phn_plan_id": "1769457413483",
+                    "last_update_time": int(
+                        updated.timestamp()
+                    ),
+                    "exercise_day": 53,
+                    "raw_value": {
+                        "result": "native"
+                    },
+                }],
+            )
+
+            fresh = db.factual_freshness(
+                datetime(
+                    2026,
+                    7,
+                    27,
+                    7,
+                    0,
+                    tzinfo=timezone.utc,
+                )
+            )
+
+            state = fresh[
+                "phn_training_plan_state"
+            ]
+
+            self.assertEqual(
+                state["event_timestamp_ms"],
+                1769457413483,
+            )
+            self.assertEqual(
+                state["last_update_local_date"],
+                "2026-07-27",
+            )
+            self.assertEqual(
+                state["coverage"],
+                "today",
+            )
+
+            db.close()
+
+
     def test_backfill_is_chunked_resumable_and_idempotent(self):
         with tempfile.TemporaryDirectory() as directory:
             db = Database(Path(directory) / "zepp.db")
@@ -225,6 +334,19 @@ class DatabaseTests(unittest.TestCase):
                 "exercise_plan_hr_lower",
                 "exercise_plan_hr_upper",
             }.issubset(exertion_columns))
+            phn_tables = {
+                row[0]
+                for row in db.connection.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type='table'"
+                ).fetchall()
+            }
+            self.assertIn(
+                "phn_daily_records", phn_tables
+            )
+            self.assertIn(
+                "phn_training_plans", phn_tables
+            )
             db.close()
 
     def test_sync_is_idempotent_and_preserves_unknowns_and_raw_payloads(self):
@@ -283,6 +405,190 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(readiness["updated"], 1)
             self.assertEqual(db.status()["record_counts"]["readiness_records"], 1)
             db.close()
+
+    def test_phn_domains_roundtrip_and_daily_status(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Database(Path(directory) / "zepp.db")
+
+            record = {
+                "date": "2026-05-18",
+                "timestamp": 1779055200000,
+                "phn_plan_id": "plan-1",
+                "flag": 62,
+                "degree_of_completion": 153,
+                "degree_of_completion_week": 30,
+                "raw_value": {"record": "native"},
+            }
+
+            plan = {
+                "date": "2026-05-28",
+                "timestamp": 1779946620000,
+                "phn_plan_id": "plan-1",
+                "last_update_time": 1779946620,
+                "exercise_day": 53,
+                "training_days": [0, 2, 4, 5],
+                "weekly_high_intensity_day":
+                    [2, 0, 1, 0, 3, 1, 0],
+                "current_weekday": 3,
+                "flag_recommended_exercise": 31,
+                "trimp_daily_recommended": 0,
+                "daily_recommend_intensity": 0,
+                "duration_zone1": 0,
+                "duration_zone2": 0,
+                "duration_zone3": 0,
+                "yesterday_recommend_flag": 61,
+                "this_week_achieved_daily_completed_percent":
+                    [81, 0, 121, 0, 0, 0, 0],
+                "raw_value": {"result": "native"},
+            }
+
+            self.assertEqual(
+                db.store_domain_rows("phn_record", [record]),
+                {
+                    "inserted": 1,
+                    "updated": 0,
+                    "unchanged": 0,
+                },
+            )
+
+            self.assertEqual(
+                db.store_domain_rows(
+                    "phn_training_plan", [plan]
+                ),
+                {
+                    "inserted": 1,
+                    "updated": 0,
+                    "unchanged": 0,
+                },
+            )
+
+            stored = db.connection.execute(
+                """SELECT flag, degree_of_completion,
+                          degree_of_completion_week
+                   FROM phn_daily_records"""
+            ).fetchone()
+
+            self.assertEqual(
+                tuple(stored),
+                ("62", "153", "30"),
+            )
+
+            stored_plan = db.connection.execute(
+                """SELECT exercise_day,
+                          training_days_json,
+                          weekly_high_intensity_day_json
+                   FROM phn_training_plans"""
+            ).fetchone()
+
+            self.assertEqual(stored_plan[0], "53")
+            self.assertEqual(
+                json.loads(stored_plan[1]),
+                [0, 2, 4, 5],
+            )
+            self.assertEqual(
+                json.loads(stored_plan[2]),
+                [2, 0, 1, 0, 3, 1, 0],
+            )
+
+            daily = db.read_daily_status(
+                "2026-05-18",
+                "2026-05-18",
+            )[0]
+
+            self.assertEqual(
+                daily["phn_record"]["flag"], "62"
+            )
+            self.assertEqual(
+                daily["phn_record"][
+                    "degree_of_completion"
+                ],
+                "153",
+            )
+
+            db.close()
+
+
+    def test_same_raw_payload_updates_when_normalized_state_changes(
+        self,
+    ):
+        """Parser improvements must refresh derived columns even for same raw."""
+        with tempfile.TemporaryDirectory() as directory:
+            db = Database(Path(directory) / "zepp.db")
+
+            plan_id = 1769457413483
+
+            # Simulates the first Batch 1B normalization before the factual
+            # phn_plan_id fallback was added.
+            first = {
+                "date": "2026-01-26",
+                "timestamp": plan_id,
+                "phn_plan_id": None,
+                "last_update_time": 1785179517,
+                "exercise_day": 53,
+                "raw_value": {
+                    "result": "identical-native-payload"
+                },
+            }
+
+            # Same raw Zepp evidence, improved normalizer now derives
+            # phn_plan_id from the production-proven event identity.
+            renormalized = {
+                **first,
+                "phn_plan_id": plan_id,
+                "raw_value": {
+                    "result": "identical-native-payload"
+                },
+            }
+
+            self.assertEqual(
+                db.store_domain_rows(
+                    "phn_training_plan",
+                    [first],
+                ),
+                {
+                    "inserted": 1,
+                    "updated": 0,
+                    "unchanged": 0,
+                },
+            )
+
+            self.assertEqual(
+                db.store_domain_rows(
+                    "phn_training_plan",
+                    [renormalized],
+                ),
+                {
+                    "inserted": 0,
+                    "updated": 1,
+                    "unchanged": 0,
+                },
+            )
+
+            stored = db.connection.execute(
+                """SELECT phn_plan_id
+                   FROM phn_training_plans"""
+            ).fetchone()
+
+            self.assertEqual(
+                stored["phn_plan_id"],
+                str(plan_id),
+            )
+
+            # A third identical normalization must now be genuinely unchanged.
+            self.assertEqual(
+                db.store_domain_rows(
+                    "phn_training_plan",
+                    [renormalized],
+                ),
+                {
+                    "inserted": 0,
+                    "updated": 0,
+                    "unchanged": 1,
+                },
+            )
+
+            db.close()
+
 
     def test_revised_same_day_wake_value_updates_existing_logical_row(self):
         with tempfile.TemporaryDirectory() as directory:
