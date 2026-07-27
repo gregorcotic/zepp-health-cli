@@ -855,3 +855,87 @@ before returning `unchanged`.
 
 This allows historical raw evidence to be safely re-normalized without
 requiring deletion or redownload.
+
+
+---
+
+## Charge / HybridCharge production closeout — 2026-07-27
+
+Status: CORE SEMANTICS SOLVED
+
+Broad Charge / BioCharge investigation is closed.
+
+Production UI + native API validation established:
+
+- `Charge/real_data.total` = Zepp HybridCharge score
+- `physical` = Physical Charge component
+- `mental` = Mental Charge component
+- `total=255` = invalid/unavailable sentinel
+- `wakeCharge` = UI Wake HybridCharge
+- `maxCharge` = native daily maximum HybridCharge
+- summary cumulative fields represent native accumulated charging/depletion
+  metrics and must not be reconstructed from integer real_data deltas
+
+30-day validation:
+
+- 42,512 valid real_data samples
+- 42,497 matched the rounded physical/mental mean
+- 99.9647% agreement
+
+Native total remains authoritative.
+
+The simple formula:
+
+`wakeCharge = round(bioChargeWake)`
+
+was disproved over 30 days.
+
+The simple formula:
+
+`cumulativeChargingEnergy = maxCharge - minCharge`
+
+was also disproved.
+
+### Time-semantics correction
+
+`Charge/real_data` is UTC-day bucketed.
+
+Example:
+
+2026-07-22 00:00 UTC
+=
+2026-07-22 02:00 Europe/Ljubljana
+
+The 02:00 local boundary is NOT physiological.
+
+`Charge/summary` and `Charge/wake_data` instead use local-day semantics via
+their `value.startTime`.
+
+For those domains, do not assign the local day from `event.timestamp`.
+
+### 22-Jul fixture
+
+UI / native exact matches:
+
+Cross-training:
+45 -> 43
+= UI -2
+
+Nap:
+35 -> 39
+= UI +4
+
+Wake:
+wakeCharge = 74
+= UI Wake HybridCharge 74
+
+This fixture is retained as production evidence for future regression work.
+
+Remaining optional research:
+
+- exact internal calculation behind cumulative charging/depletion
+- exact mathematical role of bioChargeWake
+- exact native activity-impact contract if needed later
+
+These are NOT blockers for TRC.
+

@@ -74,7 +74,7 @@ sidecar files.
 
 ## Migrations and deployment
 
-The database initializes with schema version 4. Future compatible schema
+The current database schema version is 6. Future compatible schema
 changes must increment the migration version and apply transactional migrations
 before normal reads/writes. The database is runtime state, not source code:
 
@@ -182,3 +182,42 @@ raw unchanged + normalized changed
 
 raw changed
 → `updated`
+
+
+## Charge / HybridCharge time semantics
+
+Charge domains do not share the same calendar anchor.
+
+### `Charge/real_data`
+
+Stored as UTC-calendar-day buckets.
+
+Example during CEST:
+
+`2026-07-22 00:00 UTC`
+=
+`2026-07-22 02:00 Europe/Ljubljana`
+
+The local 02:00 representation must not be treated as a physiological day
+boundary.
+
+### `Charge/summary` and `Charge/wake_data`
+
+These use local-calendar-day semantics through `value.startTime`.
+
+Use the local date derived from `value.startTime`.
+
+Do not use `event.timestamp` to assign their local calendar day.
+
+### Sentinel handling
+
+For `Charge/real_data.total`:
+
+`255`
+= invalid/unavailable HybridCharge sentinel
+
+Never expose 255 as a valid score.
+
+Native `total` remains authoritative when valid; do not reconstruct it from
+physical/mental components merely because the relationship is very strong.
+

@@ -412,3 +412,31 @@ Identical raw evidence with corrected normalized output is classified as
 Never use raw-payload equality alone as the definition of canonical database
 equality. Historical native evidence must remain re-normalizable after parser
 improvements.
+
+
+## Charge day appears to start at 02:00
+
+### Symptom
+
+`Charge/real_data` appears to begin at 02:00 when timestamps are displayed in
+Europe/Ljubljana during summer.
+
+### Root cause
+
+The real_data bucket is anchored at 00:00 UTC.
+
+During CEST:
+
+00:00 UTC = 02:00 Europe/Ljubljana
+
+This is a transport/calendar bucket boundary, not a physiological start of day.
+
+### Fix / rule
+
+Keep the UTC real_data bucket identity separate from local-calendar semantics.
+
+For `Charge/summary` and `Charge/wake_data`, local-day attribution instead
+comes from the local date represented by `value.startTime`.
+
+Do not use event.timestamp as a universal Charge day key.
+

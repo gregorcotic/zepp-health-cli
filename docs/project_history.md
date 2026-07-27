@@ -418,8 +418,11 @@ already recorded there, and do not promote candidate meanings to production
 semantics without evidence. Raw Zepp-native values remain the source of truth.
 
 Batch 1A extended Exertion end-to-end and was validated by unit tests and live
-production data (`2517ae8`). Batch 1B is the PHN / Zepp Coach gap; repository
-search confirmed no current PHN implementation.
+production data (`2517ae8`).
+
+Historical note: at the time of the original audit, PHN / Zepp Coach support
+was identified as the next implementation gap. This status is now SUPERSEDED:
+Batch 1B was subsequently implemented and production-validated in Z002.1.
 
 
 ## Z002.1 — Native PHN / Zepp Coach integration
@@ -451,3 +454,46 @@ If the raw payload is identical but normalization has changed, the row is
 classified as `updated` and the corrected canonical fields are persisted.
 
 This rule applies to all native health domains, not only PHN.
+
+
+## Z002.2 — Charge / HybridCharge semantics and time contract
+
+Completed production validation of the core native Charge / HybridCharge model.
+
+UI-to-API evidence confirms:
+
+- `Charge/real_data.total` is the native HybridCharge score.
+- `physical` and `mental` are its component signals.
+- 255 is an invalid/unavailable total sentinel.
+- `wakeCharge` matches Zepp UI Wake HybridCharge.
+- `maxCharge` is the native daily maximum HybridCharge.
+- cumulative charging/consumption are native accumulated metrics and should
+  not be reconstructed from integer real_data deltas.
+
+A 30-day validation compared 42,512 valid real_data samples. 42,497 matched
+the rounded physical/mental component mean (99.9647%), while native total
+remains authoritative.
+
+The 22-Jul-2026 fixture gave direct UI/native event matches:
+
+- Cross-training: 45 -> 43 = UI -2
+- Nap: 35 -> 39 = UI +4
+- Wake HybridCharge: API 74 = UI 74
+
+### Time contract
+
+`Charge/real_data` is stored in UTC-day buckets.
+
+During CEST:
+
+00:00 UTC
+=
+02:00 Europe/Ljubljana
+
+This must not be interpreted as a physiological 02:00 day boundary.
+
+`Charge/summary` and `Charge/wake_data` use local-calendar-day semantics via
+`value.startTime`.
+
+This distinction is now a standing parser/data-model rule.
+
