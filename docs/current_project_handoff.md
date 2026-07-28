@@ -102,19 +102,39 @@ A record is `unchanged` only when:
 
 This keeps historical raw evidence safely re-normalizable when parsers improve.
 
-## Still open legacy-specific work
+## Legacy audit — final status
 
-Prioritize only concrete unresolved items:
+Status: BROAD LEGACY AUDIT CLOSED
 
-1. remaining Charge/BioCharge semantics
-2. Stress
-3. Food/Nutrition integration
-4. Respiratory Rate current-project validation only
-5. recoveryFactor semantics
-6. recoveryFactorID semantics
-7. insightState semantics
-8. resting calories / TDEE
-9. exact PHN 51/61/62 semantics only if useful evidence appears
+Production-validated / implementation-ready domains:
+
+- Exertion core metrics
+- PHN / Zepp Coach
+- Charge / HybridCharge
+- Stress via `all_day_stress`
+- Food / Nutrition
+- native activity detail
+- canonical activity model
+- activity persistence / incremental sync
+- LifeLoad semantics
+- activity-calorie semantics
+- Zepp UI total-consumption relationship
+
+Deferred non-blocking semantics:
+
+- Respiratory Rate binary decoder/readback
+- exact `recoveryFactor` labels
+- exact `recoveryFactorID` dictionary
+- exact `insightState` dictionary
+- exact PHN 51/61/62 meaning
+- exact Resting-energy source/algorithm
+- exact Charge cumulative-energy internal algorithms
+
+These unresolved items are not blockers for TRC or for integrating the
+production-validated factual domains.
+
+Standing rule:
+do not restart broad Legacy -> current gap research.
 
 Separately, native activity quality/elevation validation remains new current
 project work and must not be conflated with Legacy migration.
@@ -605,4 +625,90 @@ use a focused Codex-assisted corpus/binary investigation to establish either a
 real readback contract or a decoder for real_data.measurements.
 
 Respiratory Rate is not currently a blocker for TRC.
+
+
+
+## Resting calories / total consumption — validated UI relationship
+
+Status: DISPLAY RELATIONSHIP SOLVED / RESTING SOURCE UNRESOLVED
+
+Production UI fixtures:
+
+26-May-2026:
+- Resting = 2307 kcal
+- Activity = 338 kcal
+- Total consumption = 2645 kcal
+
+27-May-2026:
+- Resting = 2307 kcal
+- Activity = 930 kcal
+- Total consumption = 3237 kcal
+
+28-May-2026:
+- Resting = 2307 kcal
+- Activity = 406 kcal
+- Total consumption = 2713 kcal
+
+All three satisfy:
+
+`Total consumption = Resting + Activity`
+
+No direct production field named restingCalories, restingEnergy, BMR, TDEE or
+equivalent was found in the capture corpus.
+
+Therefore:
+
+- Zepp UI Total consumption semantics are validated.
+- Activity/Exercise calories are production-validated.
+- The source or algorithm behind Zepp's Resting value remains unresolved.
+- Do NOT label Resting as BMR without evidence.
+- Do NOT invent a Resting formula in current code.
+
+
+
+## SPORT_LOAD — newly discovered Training Status contract
+
+Status: PRODUCTION DISCOVERED / NEXT DEDICATED BATCH
+
+Live capture exposed:
+
+`WatchSportStatistics / SPORT_LOAD`
+
+Observed fields include:
+
+- `currnetDayTrainLoad`
+- `wtlSum`
+- `wtlSumOptimalMin`
+- `wtlSumOptimalMax`
+- `wtlSumOverreaching`
+
+Known production fixture:
+
+- current day train load = 0
+- wtlSum = 437
+- optimal minimum = 330
+- optimal maximum = 735
+- overreaching threshold = 864
+
+The same Zepp Training Status UI showed `Optimal`.
+
+Because:
+
+`330 <= 437 <= 735`
+
+the contract is strongly consistent with the UI Optimal classification.
+
+Do NOT assume `wtlSum` is ATL or CTL.
+
+Known UI values from the same Training Status system include:
+
+- ATL / Fatigue Level
+- CTL / Fitness Level
+- TSB / Form
+
+with:
+
+`TSB = CTL - ATL`
+
+SPORT_LOAD should be investigated and implemented as a separate next batch.
 

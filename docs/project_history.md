@@ -595,3 +595,27 @@ deferred unless future requirements specifically need its model features.
 
 Current work is therefore implementation, not semantic research.
 
+
+
+## Z002.6 — Legacy audit closeout
+
+Closed the broad Legacy ZeppAiAgent -> zepp-health-cli semantic audit.
+
+The project now has production-backed contracts for the core factual domains
+needed by future TRC/AI Coach work.
+
+Remaining unknown enum dictionaries and binary/internal formulas were
+explicitly classified as non-blocking and must remain raw rather than receive
+guessed semantics.
+
+Validated Zepp UI energy relationship:
+
+`Total consumption = Resting + Activity`
+
+across the 26/27/28-May production fixtures.
+
+The exact Resting source/algorithm remains unresolved.
+
+A new `WatchSportStatistics / SPORT_LOAD` contract was also discovered and is
+reserved as the next dedicated training-load batch.
+

@@ -1090,3 +1090,87 @@ not required for ordinary factual Stress support.
 
 Do not restart stressInfo decoding unless a concrete future requirement exists.
 
+
+
+---
+
+## Final Legacy audit closeout
+
+Status: BROAD AUDIT CLOSED
+
+The Legacy -> current gap audit has reached sufficient production coverage for
+the project to move into implementation.
+
+Solved / implementation-ready:
+
+- Exertion core
+- PHN / Zepp Coach
+- Charge / HybridCharge
+- Stress factual contract
+- Food / Nutrition
+- activity detail
+- canonical activity model
+- activity persistence
+- LifeLoad semantics
+- active/activity-calorie semantics
+- Zepp UI total-consumption relationship
+
+Deferred without blocking TRC:
+
+- Respiratory Rate decoder/readback
+- recoveryFactor exact labels
+- recoveryFactorID dictionary
+- insightState dictionary
+- PHN 51/61/62 exact semantics
+- Resting-energy source/algorithm
+- Charge cumulative internal algorithms
+
+### Remaining Exertion raw enums
+
+Production corpus observed:
+
+`recoveryFactor`
+- values 0,1,2,3,4
+
+`recoveryFactorID`
+- values 1,2,3
+
+`insightState`
+- values 0..6
+
+No evidence-backed UI dictionary was established.
+
+Preserve these native values raw.
+Do not invent labels.
+
+### Resting / Total consumption
+
+Production UI proved:
+
+`Total consumption = Resting + Activity`
+
+across multiple days.
+
+No direct native Resting/BMR/TDEE field was found.
+
+Do not interpret Resting as BMR without evidence.
+
+### SPORT_LOAD
+
+A new production contract was discovered:
+
+`WatchSportStatistics / SPORT_LOAD`
+
+with:
+
+- currnetDayTrainLoad
+- wtlSum
+- wtlSumOptimalMin
+- wtlSumOptimalMax
+- wtlSumOverreaching
+
+This becomes the next dedicated research/implementation batch after the current
+legacy closeout.
+
+Do not restart the broad audit.
+
