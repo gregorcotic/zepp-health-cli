@@ -221,3 +221,44 @@ Never expose 255 as a valid score.
 Native `total` remains authoritative when valid; do not reconstruct it from
 physical/mental components merely because the relationship is very strong.
 
+
+
+## Planned Food / Nutrition persistence contract
+
+The native Food contract is production-validated but first-class current
+SQLite persistence should follow the existing RAW -> NORMALIZED -> SEMANTIC ->
+QUALITY separation.
+
+Minimum factual fields to preserve:
+
+- native event timestamp
+- `foodLogId`
+- `mealType`
+- normalized meal label
+- `mealName`
+- `foodName`
+- `measureWeight`
+- `weightUnit`
+- `energy`
+- `carbohydrates`
+- `protein`
+- `fatTotal`
+- `fiber`
+- `servings`
+- `labels`
+- `emoji`
+- `recognizeType`
+- `recognizeSourceType`
+- raw payload/provenance
+
+mealType semantic dictionary:
+
+1 Breakfast
+2 Morning Snack
+3 Lunch
+4 Afternoon Snack
+5 Dinner
+6 Evening Snack
+
+Food Goals should be stored separately from individual Food Log records.
+

@@ -526,3 +526,39 @@ manual project time on low-yield reverse engineering.
 This is not abandonment. All evidence and disproven hypotheses are preserved
 for a later focused Codex task.
 
+
+
+## Z002.4 — Food / Nutrition contract solved
+
+Completed production validation of the native Food/Nutrition domain.
+
+A controlled Banana entry established the native Food Log contract:
+
+POST `/v2/users/me/events`
+with `eventType=Food`, `subType=real_data`.
+
+Production payloads exposed food identity, meal category, weight, calories,
+macros, fiber, servings, labels, photo-recognition provenance and stable
+`foodLogId` identity across edits.
+
+The same Banana entry was moved through every Zepp meal category, producing a
+fully production-validated mealType dictionary:
+
+1 Breakfast
+2 Morning Snack
+3 Lunch
+4 Afternoon Snack
+5 Dinner
+6 Evening Snack
+
+Food Goals remain a separate property contract under:
+
+`huami.mifit.user.settings.food.goal`
+
+Food Insight was confirmed as a separate advisory endpoint. Its `calorie`
+query parameter matched current exercise/activity calories rather than consumed
+food calories.
+
+This closes the broad Food/Nutrition reverse-engineering task and makes the
+domain implementation-ready for the current zepp-health-cli architecture.
+

@@ -571,15 +571,22 @@ Observed capabilities include:
 
 Food is suitable for future integration.
 
-OPEN:
+SOLVED / SUPERSEDED BY PRODUCTION CAPTURE:
 
-numeric `mealType` mapping to:
-- Breakfast
-- Lunch
-- Dinner
-- Snack
+Exact `mealType` mapping was subsequently production-validated using the same
+Food Log entry moved through all six Zepp meal categories:
 
-This should be solved with a small controlled capture rather than guessed.
+- `1` = Breakfast
+- `2` = Morning Snack
+- `3` = Lunch
+- `4` = Afternoon Snack
+- `5` = Dinner
+- `6` = Evening Snack
+
+The same `foodLogId` and food identity were preserved during the controlled
+capture.
+
+Do not repeat this mapping research.
 
 ---
 
@@ -696,7 +703,7 @@ High priority:
 7. PHN exact 61/62/51 thresholds
 8. Stress
 9. Resting calories / total expenditure
-10. Food mealType mapping
+10. Food mealType mapping — DONE / production-validated
 11. Legacy vs current final gap matrix
 
 Quick-win candidate:
@@ -993,4 +1000,44 @@ Do not restart broad Stress research.
 
 Next recommended action:
 defer remaining work to a focused Codex-assisted corpus/protobuf task.
+
+
+
+---
+
+## Food / Nutrition production closeout
+
+Status: CORE CONTRACT SOLVED
+
+Earlier uncertainty around production provenance is now superseded by live
+production captures.
+
+Confirmed:
+
+- native Food Log uses `Food / real_data`
+- `foodLogId` is production-proven
+- weight, calories and macro fields are production-proven
+- edit/upsert identity behavior is production-proven
+- photo-recognition provenance fields are production-proven
+- exact mealType mapping 1..6 is production-proven
+
+mealType mapping:
+
+1 = Breakfast
+2 = Morning Snack
+3 = Lunch
+4 = Afternoon Snack
+5 = Dinner
+6 = Evening Snack
+
+The Banana controlled fixture is the primary production reference.
+
+Food Goals also have a known `/users/{id}/properties` contract using:
+
+`huami.mifit.user.settings.food.goal`
+
+The Food Insight endpoint is separate and must not be confused with actual
+consumed food records.
+
+Do not restart broad Food/Nutrition research.
 

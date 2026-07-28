@@ -482,3 +482,25 @@ Do not derive or invent Stress scores from these internal feature arrays.
 A separate legacy event contract containing explicit `avgStress` is the
 preferred lead for future implementation.
 
+
+
+## Food Insight calories are not consumed-food calories
+
+### Symptom
+
+The `/aura/insight/food/daily` endpoint contains a `calorie` query parameter
+that may look like consumed-food calories.
+
+### Production evidence
+
+The value matched Zepp UI Exercise/Activity calories:
+
+- 26-May-2026: 338 == UI exercise calories 338
+- 27-May-2026: 930 == UI exercise calories 930
+
+### Rule
+
+Do not interpret this query parameter as food intake.
+
+Actual consumed-food records come from the native `Food / real_data` domain.
+

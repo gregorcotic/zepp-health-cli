@@ -450,3 +450,152 @@ When Codex is available, give it a focused task to:
 
 Until then, Stress is not a blocker for the wider Zepp/TRC project.
 
+
+
+## Food / Nutrition — production-validated core contract
+
+Status: CORE CONTRACT SOLVED / IMPLEMENTATION-READY
+
+Do NOT restart broad Food/Nutrition reverse engineering.
+
+### Native Food Log contract
+
+Production-captured endpoint:
+
+POST `/v2/users/me/events`
+
+with:
+
+- `eventType = Food`
+- `subType = real_data`
+
+A controlled Banana fixture was production-captured and matched the Zepp UI.
+
+Known fields include:
+
+- `foodLogId`
+- `mealType`
+- `mealName`
+- `foodName`
+- `measureWeight`
+- `weightUnit`
+- `energy`
+- `carbohydrates`
+- `protein`
+- `fatTotal`
+- `fiber`
+- `servings`
+- `labels`
+- `emoji`
+- `recognizeType`
+- `recognizeSourceType`
+
+### Banana production fixture
+
+Known Zepp UI state:
+
+- meal: Afternoon Snack
+- meal time: 13:36
+- Banana x2
+- original weight: 240 g
+- original energy: 210 kcal
+- UI macros approximately:
+  - carbs 54 g
+  - protein 3 g
+  - fat 1 g
+
+Controlled edit:
+
+240 g -> 250 g
+
+Native payload then contained approximately:
+
+- `measureWeight = 250`
+- `energy = 218.75`
+- `carbohydrates = 56.25`
+- `protein = 2.708333...`
+- `fatTotal = 0.833333...`
+- `fiber = 3.1`
+
+The same `foodLogId` remained associated with the edited entry.
+
+This is strong production evidence for edit/upsert identity semantics.
+
+### mealType dictionary
+
+Production-validated by moving the same Banana entry through all six Zepp meal
+categories while keeping food identity and other fields stable.
+
+Mapping:
+
+- `1` = Breakfast
+- `2` = Morning Snack
+- `3` = Lunch
+- `4` = Afternoon Snack
+- `5` = Dinner
+- `6` = Evening Snack
+
+Do NOT treat these as guessed labels; this mapping is production-validated.
+
+### Food Goals contract
+
+Known contract:
+
+POST `/users/{user_id}/properties`
+
+Property:
+
+`huami.mifit.user.settings.food.goal`
+
+Known fields:
+
+- `calorie`
+- `carb_percent`
+- `protein_percent`
+- `fat_percent`
+
+Known UI fixture:
+
+- calorie goal = 2700 kcal
+- carbs = 30%
+- protein = 45%
+- fats = 25%
+
+Zepp requires:
+
+`carb_percent + protein_percent + fat_percent = 100`
+
+A later controlled UI state used:
+
+- carbs = 35%
+- protein = 40%
+- fats = 25%
+
+### Food Insight
+
+Production-captured endpoint:
+
+`/aura/insight/food/daily`
+
+Important correction:
+
+the `calorie` query parameter was matched against Zepp UI Exercise/Activity
+calories and is NOT consumed-food calories.
+
+Examples:
+
+- 26-May-2026: UI Exercise 338 == endpoint calorie 338
+- 27-May-2026: UI Exercise 930 == endpoint calorie 930
+
+### Standing architecture rule
+
+Keep separate:
+
+- Food Log = factual consumed-food records
+- Food Goals = user-configured targets
+- Food Insight = advisory/AI narrative layer
+
+Future TRC/coach logic should consume factual Food Log + Goals data first.
+Food Insight may be preserved as optional advisory evidence but must not replace
+the factual nutrition layer.
+
