@@ -504,3 +504,22 @@ Do not interpret this query parameter as food intake.
 
 Actual consumed-food records come from the native `Food / real_data` domain.
 
+
+
+## Stress stressInfo is not required for factual Stress
+
+The encoded `Charge/stress_data/stressInfo` payload initially appeared to be
+the only available Stress source and triggered protobuf reverse engineering.
+
+Later production captures revealed the direct factual event:
+
+`all_day_stress`
+
+which already contains the final 5-minute Stress timeline and daily summary.
+
+Therefore:
+
+- use all_day_stress for factual Stress
+- keep stressInfo as optional internal/model evidence
+- do not restart stressInfo decoding unless a concrete requirement exists
+

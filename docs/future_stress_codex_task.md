@@ -1,113 +1,59 @@
-# Future Codex task — native Zepp Stress completion
+# Future implementation task — native Zepp Stress
 
-Status: DEFERRED / READY FOR FOCUSED INVESTIGATION
+Status: FACTUAL CONTRACT SOLVED / READY FOR IMPLEMENTATION
 
-## Objective
+Do NOT restart protobuf reverse engineering.
 
-Complete first-class Zepp Stress support without repeating the manual research
-already performed.
+## Preferred factual contract
 
-## Read first
+Use:
 
-- `docs/current_project_handoff.md`
-- `docs/legacy_zepp_audit.md`
-- `docs/project_history.md`
-- `docs/troubleshooting/zepp_health_troubleshooting.md`
+`eventType = all_day_stress`
 
-## Known UI fixture — 28-May-2026
+Known native payload:
 
-Daily:
+- data
+- minStress
+- maxStress
+- avgStress
+- relaxProportion
+- normalProportion
+- mediumProportion
+- highProportion
 
-- Min = 9
-- Max = 61
-- Avg = 34
-- Relaxed = 52%
-- Normal = 47%
-- Medium = 1%
-- High = 0%
+`data` is a sparse 5-minute timeline:
 
-5-minute points:
+- time = epoch milliseconds
+- value = Stress score 0–100
 
-- 05:50 = 40
-- 05:55 = 28
-- 06:00 = missing
-- 06:35 = missing
+Missing intervals are missing measurements, not zero.
 
-Thresholds:
+## Score categories
 
 - 0–39 Relaxed
 - 40–59 Normal
 - 60–79 Medium
 - 80–100 High
 
-## Native evidence
+These were mathematically validated against native category proportions.
 
-Captured upload:
+## Implementation order
 
-POST `/v2/users/me/events`
+1. Verify a cloud GET/readback path for all_day_stress.
+2. Add first-class normalization.
+3. Persist daily summary separately from 5-minute samples.
+4. Add incremental sync/upsert.
+5. Preserve raw payload/provenance.
+6. Add factual freshness.
+7. Add CLI JSON output.
+8. Add production-fixture tests.
+9. Keep native avgStress authoritative.
 
-`eventType=Charge`
-`subType=stress_data`
+## Important do-not-repeat rule
 
-Payload includes:
+`Charge/stress_data/stressInfo` is an internal protobuf-like feature/model
+package.
 
-- `value.startTime`
-- `samples[].minuteOfDay`
-- `samples[].stressInfo`
-
-`stressInfo` is base64 protobuf-like binary.
-
-Manual reverse engineering established:
-
-- FIELD 1 is not the direct UI Stress score stream
-- FIELD 1 is not a simple validity mask
-- ±15-minute offset mapping is disproven
-- fields 6/8 are feature-vector style data, not final scores
-- do not fit a Stress formula from two UI points
-
-Separate legacy event evidence contains explicit:
-
-`avgStress`
-
-Known captures include:
-
-- avgStress = 28
-- avgStress = 34
-
-The `avgStress=34` capture matches the 28-May-2026 UI daily average.
-
-## Required investigation order
-
-1. Search the complete capture corpus for `avgStress`.
-2. Identify the exact eventType/subType and full payload containing it.
-3. Look for related:
-   - minStress
-   - maxStress
-   - stress timeline
-   - category distribution
-   - per-5-minute scores
-4. Reconstruct the 28-May-2026 UI fixture from explicit native fields if
-   possible.
-5. Only if no direct score contract exists, return to `stressInfo` protobuf
-   analysis.
-6. Do not invent semantics.
-7. Preserve raw values and provenance.
-8. Add first-class normalization, SQLite persistence, CLI access, tests, and
-   factual freshness only after the native final-score contract is proven.
-
-## Success criteria
-
-A production-backed implementation must reproduce at least:
-
-28-May-2026:
-
-- Avg = 34
-- Min = 9
-- Max = 61
-- 05:50 = 40
-- 05:55 = 28
-- 06:00 = missing
-- 06:35 = missing
-
-without reverse-engineered guesswork.
+Do not decode it unless a future requirement needs a metric that
+all_day_stress does not expose.
 

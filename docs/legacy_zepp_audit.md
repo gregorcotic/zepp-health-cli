@@ -1041,3 +1041,52 @@ consumed food records.
 
 Do not restart broad Food/Nutrition research.
 
+
+
+---
+
+## Stress factual contract closeout
+
+Status: FACTUAL CONTRACT SOLVED
+
+Later live capture work superseded the earlier DEFERRED status.
+
+The final factual Stress layer is available directly through:
+
+`eventType = all_day_stress`
+
+Payload fields include:
+
+- `data`
+- `minStress`
+- `maxStress`
+- `avgStress`
+- `relaxProportion`
+- `normalProportion`
+- `mediumProportion`
+- `highProportion`
+
+`data` is a sparse 5-minute timeline:
+
+- `time` = epoch milliseconds
+- `value` = Stress score
+
+Validated category boundaries:
+
+- 0–39 Relaxed
+- 40–59 Normal
+- 60–79 Medium
+- 80–100 High
+
+Native min/max and category proportions were mathematically reproduced from
+the timeline across multiple production fixtures.
+
+Native avgStress should remain authoritative because some snapshots indicate
+integer conversion/truncation behavior rather than simple rounding.
+
+The earlier `Charge/stress_data/stressInfo` protobuf investigation is retained
+as historical evidence only. It is an internal feature/model package and is
+not required for ordinary factual Stress support.
+
+Do not restart stressInfo decoding unless a concrete future requirement exists.
+

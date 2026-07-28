@@ -562,3 +562,36 @@ food calories.
 This closes the broad Food/Nutrition reverse-engineering task and makes the
 domain implementation-ready for the current zepp-health-cli architecture.
 
+
+
+## Z002.5 — Stress factual contract solved
+
+A later live capture discovered the direct factual Stress event contract:
+
+`eventType=all_day_stress`
+
+This superseded the earlier decision to defer the domain because
+`Charge/stress_data/stressInfo` appeared to require protobuf reverse
+engineering.
+
+The all_day_stress payload directly contains:
+
+- sparse 5-minute Stress timeline
+- daily min/max/avg
+- Relaxed/Normal/Medium/High proportions
+
+Multiple production fixtures mathematically reproduced native min/max and
+distribution values from the timeline.
+
+Validated Stress categories:
+
+- 0–39 Relaxed
+- 40–59 Normal
+- 60–79 Medium
+- 80–100 High
+
+The internal `stressInfo` package is no longer a blocker and should remain
+deferred unless future requirements specifically need its model features.
+
+Current work is therefore implementation, not semantic research.
+

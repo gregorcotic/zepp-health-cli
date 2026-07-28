@@ -311,145 +311,112 @@ Never infer local-day semantics from UTC bucket boundaries.
 
 
 
-## Stress — partially reverse-engineered / deferred
+## Stress — factual contract solved
 
-Status: PARTIALLY REVERSE-ENGINEERED / DEFERRED
+Status: FACTUAL CONTRACT SOLVED / IMPLEMENTATION-READY
 
-Meaning of DEFERRED:
-the domain is not abandoned. Current manual reverse engineering is paused
-because the remaining work is disproportionately expensive and better suited
-to a later systematic Codex-assisted corpus/protobuf analysis.
+Do NOT restart broad Stress reverse engineering.
 
-Do NOT restart Stress research from zero.
+### Preferred factual contract
 
-### Production/UI-verified semantics
+Production captures expose:
 
-Zepp UI Stress uses a 0–100 scale.
+`eventType = all_day_stress`
 
-Thresholds:
+The payload contains the final factual Stress layer directly.
+
+Known fields:
+
+- `data`
+- `minStress`
+- `maxStress`
+- `avgStress`
+- `relaxProportion`
+- `normalProportion`
+- `mediumProportion`
+- `highProportion`
+
+`data` is a JSON 5-minute Stress timeline containing:
+
+- `time` = epoch milliseconds
+- `value` = Stress score
+
+The timeline is sparse. Missing 5-minute intervals mean no valid Stress
+measurement; they must not be converted to zero.
+
+### Production-validated score semantics
+
+Stress score range:
 
 - 0–39 = Relaxed
 - 40–59 = Normal
 - 60–79 = Medium
 - 80–100 = High
 
-The UI exposes 5-minute points and daily:
+These boundaries were validated both from the Zepp UI and mathematically
+against native all_day_stress category proportions.
 
-- Min
-- Max
-- Avg
-- category distribution
+### Mathematical validation
 
-Production UI fixture:
+Production fixtures reproduced native:
+
+- minStress
+- maxStress
+- category proportions
+
+directly from `data[].value`.
+
+Known examples:
 
 28-May-2026:
+- 73 samples
+- min 10 = native 10
+- max 53 = native 53
+- mean 28.1233
+- native avgStress 28
+- calculated proportions 73/27/0/0 = native 73/27/0/0
 
-- Min = 9
-- Max = 61
-- Avg = 34
-- Relaxed = 52%
-- Normal = 47%
-- Medium = 1%
-- High = 0%
+Another 28-May snapshot:
+- 72 samples
+- mean 27.8333
+- native avgStress 27
 
-Known point fixtures:
+2-Jun-2026:
+- 112 samples
+- min 10 = native 10
+- max 55 = native 55
+- mean 34.0357
+- native avgStress 34
+- calculated proportions 54/46/0/0 = native 54/46/0/0
 
-- 05:50 = 40
-- 05:55 = 28
-- 06:00 = missing
-- 06:35 = missing
+Native `avgStress` remains authoritative. Evidence suggests Zepp may truncate
+or otherwise integer-convert the mean in some snapshots rather than applying
+ordinary rounding.
 
-### Native upload contract
+### stressInfo relationship
 
-A production-captured native upload exists at:
+`Charge / stress_data / stressInfo` remains an encoded protobuf-like internal
+feature/model package.
 
-POST /v2/users/me/events
+Manual reverse engineering established that its large arrays and repeated
+feature vectors are NOT required to obtain final factual Stress.
 
-with:
+Do NOT decode stressInfo for ordinary TRC/coach Stress support unless a future
+requirement proves it contains a needed metric unavailable from
+`all_day_stress`.
 
-- eventType = Charge
-- subType = stress_data
+### Current implementation gap
 
-The payload contains:
+The factual contract is solved, but current `zepp-health-cli` still needs:
 
-- value.startTime
-- samples[].minuteOfDay
-- samples[].s
-- samples[].u
-- samples[].e
-- samples[].stressInfo
+- cloud read-path validation for `all_day_stress`
+- first-class normalization
+- SQLite persistence
+- incremental sync
+- CLI factual output
+- tests/freshness
 
-`stressInfo` is a base64-encoded protobuf-like binary package.
-
-The server response is an ACK, not a decoded Stress timeline.
-
-### Binary reverse-engineering findings
-
-The binary package was successfully parsed at protobuf wire level.
-
-Important findings:
-
-- large FIELD 1 contains 2880 fixed32 values
-- this strongly resembles two 1440-minute feature arrays
-- each half contains 288 non-zero points at 5-minute spacing
-- FIELD 1 is NOT the direct Stress score stream
-- FIELD 1 is NOT a simple validity mask
-- ±15 minute clock-offset sweep did not resolve the UI mapping
-- fields 6 and 8 contain repeated feature-vector style submessages
-- fields 6/8 are not direct Stress scores
-- several other fields look like rolling/statistical/model features
-
-Therefore `stressInfo` should currently be treated as a model/feature package,
-not as a directly decoded Stress timeline.
-
-### Explicit summary evidence outside stressInfo
-
-A separate legacy event contract contains an explicit field:
-
-`avgStress`
-
-Captured examples include:
-
-- avgStress = 28
-- avgStress = 34
-
-The `avgStress = 34` capture matches the known 28-May-2026 UI daily Avg = 34
-fixture and is strong evidence that a more directly usable Stress summary
-contract exists separately from the encoded `Charge/stress_data` feature blob.
-
-### Disproven hypotheses
-
-Do NOT repeat these:
-
-- FIELD 1 is the direct Stress score timeline
-- FIELD 1 is a simple 0/1 validity mask
-- a simple ±15-minute array offset explains UI bucket timing
-- fields 6/8 directly contain Stress scores
-- a simple two-point linear transform from FIELD 1 is the Stress formula
-
-### Still open
-
-- exact eventType/subType for the final usable Stress summary/timeline
-- exact GET/readback contract
-- minStress / maxStress / individual 5-minute score fields
-- protobuf schema for `stressInfo`
-- final inference/model output location
-
-### Recommended next method
-
-Do not continue manual protobuf archaeology unless there is a concrete blocker.
-
-When Codex is available, give it a focused task to:
-
-1. search the full capture corpus for explicit Stress summary/timeline contracts;
-2. correlate `avgStress`, Min, Max, and 5-minute UI fixtures;
-3. systematically infer protobuf structure only if no direct contract exists;
-4. produce tests against the 28-May-2026 UI fixture;
-5. implement first-class Stress support only after the final score contract is
-   proven.
-
-Until then, Stress is not a blocker for the wider Zepp/TRC project.
-
+This is implementation work, not further semantic reverse engineering.
 
 
 ## Food / Nutrition — production-validated core contract
@@ -598,4 +565,44 @@ Keep separate:
 Future TRC/coach logic should consume factual Food Log + Goals data first.
 Food Insight may be preserved as optional advisory evidence but must not replace
 the factual nutrition layer.
+
+
+
+## Respiratory Rate — deferred for later decoder work
+
+Status: PARTIALLY REVERSE-ENGINEERED / DEFERRED
+
+Production evidence proves:
+
+`eventType = RespiratoryRate`
+`subType = real_data`
+
+The native payload contains encoded `value.measurements`.
+
+Legacy discovery concluded that this measurements payload is binary/base64 and
+not yet import-ready.
+
+Legacy code also contains a prepared parser/model for:
+
+`RespiratoryRate / record`
+
+with expected fields such as:
+
+- `respiratoryRate`
+- `recoveryScore`
+- `minuteOfDay`
+
+However, provenance review found no production raw capture proving that the
+`record` contract actually exists on the current account.
+
+Those fields are currently fixture-derived, not production-proven.
+
+Do NOT port the fixture-based `record` model into current code as factual truth
+without production evidence.
+
+Recommended future work:
+use a focused Codex-assisted corpus/binary investigation to establish either a
+real readback contract or a decoder for real_data.measurements.
+
+Respiratory Rate is not currently a blocker for TRC.
 
