@@ -440,3 +440,45 @@ comes from the local date represented by `value.startTime`.
 
 Do not use event.timestamp as a universal Charge day key.
 
+
+
+## Stress stressInfo is not a direct score stream
+
+### Symptom
+
+`Charge/stress_data` contains a large base64 `stressInfo` blob and it is
+tempting to interpret the first large 5-minute-looking array directly as the
+Zepp UI Stress timeline.
+
+### Investigation
+
+The blob is protobuf-like and can be parsed at wire level.
+
+FIELD 1 contains 2880 fixed32 values with a strong 5-minute structure, but
+comparison against the 28-May-2026 Zepp UI fixture disproved both:
+
+- direct Stress-score interpretation
+- simple validity-mask interpretation
+
+The known UI sequence:
+
+- 05:50 = 40
+- 05:55 = 28
+- 06:00 = missing
+- 06:35 = missing
+
+could not be reproduced even after a ±15-minute offset sweep.
+
+Fields 6 and 8 also decode as repeated feature-vector style messages and are
+not final Stress scores.
+
+### Rule
+
+Treat `stressInfo` as an encoded model/feature package until the final score
+contract is proven.
+
+Do not derive or invent Stress scores from these internal feature arrays.
+
+A separate legacy event contract containing explicit `avgStress` is the
+preferred lead for future implementation.
+

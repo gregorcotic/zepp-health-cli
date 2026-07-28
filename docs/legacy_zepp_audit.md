@@ -939,3 +939,58 @@ Remaining optional research:
 
 These are NOT blockers for TRC.
 
+
+
+---
+
+## Stress reverse-engineering status — DEFERRED
+
+Status: PARTIALLY REVERSE-ENGINEERED / DEFERRED
+
+Current manual investigation reached the point where further progress requires
+systematic corpus/protobuf analysis rather than ad-hoc probing.
+
+Verified UI semantics:
+
+- Stress scale: 0–100
+- Relaxed: 0–39
+- Normal: 40–59
+- Medium: 60–79
+- High: 80–100
+- UI timeline uses 5-minute points
+- daily Min / Max / Avg exist
+
+28-May-2026 validation fixture:
+
+- Min = 9
+- Max = 61
+- Avg = 34
+- 05:50 = 40
+- 05:55 = 28
+- 06:00 = missing
+- 06:35 = missing
+
+Native captured upload:
+
+POST `/v2/users/me/events`
+
+with:
+
+- `eventType=Charge`
+- `subType=stress_data`
+
+contains `samples[].stressInfo`, a protobuf-like encoded feature package.
+
+Wire-level inspection proved that the main arrays and repeated submessages are
+not direct Stress score streams and do not provide a simple validity mask.
+
+A separate legacy event contract contains explicit `avgStress` values. One
+captured `avgStress=34` matches the 28-May UI daily average exactly.
+
+This is currently the strongest lead for future implementation.
+
+Do not restart broad Stress research.
+
+Next recommended action:
+defer remaining work to a focused Codex-assisted corpus/protobuf task.
+

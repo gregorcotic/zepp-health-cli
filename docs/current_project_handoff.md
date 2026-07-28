@@ -309,3 +309,144 @@ Keep separate:
 
 Never infer local-day semantics from UTC bucket boundaries.
 
+
+
+## Stress — partially reverse-engineered / deferred
+
+Status: PARTIALLY REVERSE-ENGINEERED / DEFERRED
+
+Meaning of DEFERRED:
+the domain is not abandoned. Current manual reverse engineering is paused
+because the remaining work is disproportionately expensive and better suited
+to a later systematic Codex-assisted corpus/protobuf analysis.
+
+Do NOT restart Stress research from zero.
+
+### Production/UI-verified semantics
+
+Zepp UI Stress uses a 0–100 scale.
+
+Thresholds:
+
+- 0–39 = Relaxed
+- 40–59 = Normal
+- 60–79 = Medium
+- 80–100 = High
+
+The UI exposes 5-minute points and daily:
+
+- Min
+- Max
+- Avg
+- category distribution
+
+Production UI fixture:
+
+28-May-2026:
+
+- Min = 9
+- Max = 61
+- Avg = 34
+- Relaxed = 52%
+- Normal = 47%
+- Medium = 1%
+- High = 0%
+
+Known point fixtures:
+
+- 05:50 = 40
+- 05:55 = 28
+- 06:00 = missing
+- 06:35 = missing
+
+### Native upload contract
+
+A production-captured native upload exists at:
+
+POST /v2/users/me/events
+
+with:
+
+- eventType = Charge
+- subType = stress_data
+
+The payload contains:
+
+- value.startTime
+- samples[].minuteOfDay
+- samples[].s
+- samples[].u
+- samples[].e
+- samples[].stressInfo
+
+`stressInfo` is a base64-encoded protobuf-like binary package.
+
+The server response is an ACK, not a decoded Stress timeline.
+
+### Binary reverse-engineering findings
+
+The binary package was successfully parsed at protobuf wire level.
+
+Important findings:
+
+- large FIELD 1 contains 2880 fixed32 values
+- this strongly resembles two 1440-minute feature arrays
+- each half contains 288 non-zero points at 5-minute spacing
+- FIELD 1 is NOT the direct Stress score stream
+- FIELD 1 is NOT a simple validity mask
+- ±15 minute clock-offset sweep did not resolve the UI mapping
+- fields 6 and 8 contain repeated feature-vector style submessages
+- fields 6/8 are not direct Stress scores
+- several other fields look like rolling/statistical/model features
+
+Therefore `stressInfo` should currently be treated as a model/feature package,
+not as a directly decoded Stress timeline.
+
+### Explicit summary evidence outside stressInfo
+
+A separate legacy event contract contains an explicit field:
+
+`avgStress`
+
+Captured examples include:
+
+- avgStress = 28
+- avgStress = 34
+
+The `avgStress = 34` capture matches the known 28-May-2026 UI daily Avg = 34
+fixture and is strong evidence that a more directly usable Stress summary
+contract exists separately from the encoded `Charge/stress_data` feature blob.
+
+### Disproven hypotheses
+
+Do NOT repeat these:
+
+- FIELD 1 is the direct Stress score timeline
+- FIELD 1 is a simple 0/1 validity mask
+- a simple ±15-minute array offset explains UI bucket timing
+- fields 6/8 directly contain Stress scores
+- a simple two-point linear transform from FIELD 1 is the Stress formula
+
+### Still open
+
+- exact eventType/subType for the final usable Stress summary/timeline
+- exact GET/readback contract
+- minStress / maxStress / individual 5-minute score fields
+- protobuf schema for `stressInfo`
+- final inference/model output location
+
+### Recommended next method
+
+Do not continue manual protobuf archaeology unless there is a concrete blocker.
+
+When Codex is available, give it a focused task to:
+
+1. search the full capture corpus for explicit Stress summary/timeline contracts;
+2. correlate `avgStress`, Min, Max, and 5-minute UI fixtures;
+3. systematically infer protobuf structure only if no direct contract exists;
+4. produce tests against the 28-May-2026 UI fixture;
+5. implement first-class Stress support only after the final score contract is
+   proven.
+
+Until then, Stress is not a blocker for the wider Zepp/TRC project.
+

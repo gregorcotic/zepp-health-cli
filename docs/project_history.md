@@ -497,3 +497,32 @@ This must not be interpreted as a physiological 02:00 day boundary.
 
 This distinction is now a standing parser/data-model rule.
 
+
+
+## Z002.3 — Stress domain investigation deferred
+
+Investigated the remaining native Stress gap.
+
+The current project does not yet have first-class Stress normalization or
+persistence.
+
+Production UI and legacy capture evidence established the Stress 0–100 scale,
+category thresholds, 5-minute UI timeline behavior, daily Min/Max/Avg, and a
+native `Charge/stress_data` POST upload carrying a protobuf-like `stressInfo`
+feature package.
+
+Manual wire-level reverse engineering disproved several tempting but incorrect
+interpretations: the large FIELD 1 arrays are neither the direct Stress score
+timeline nor a simple validity mask, and a ±15-minute offset does not explain
+the UI mapping. Fields 6/8 are feature vectors rather than final scores.
+
+A separate legacy event payload containing explicit `avgStress` was found.
+`avgStress=34` matches the known 28-May-2026 Zepp UI daily average exactly.
+
+Because the remaining work is better suited to systematic corpus/protobuf
+analysis, Stress was intentionally marked DEFERRED rather than spending more
+manual project time on low-yield reverse engineering.
+
+This is not abandonment. All evidence and disproven hypotheses are preserved
+for a later focused Codex task.
+
