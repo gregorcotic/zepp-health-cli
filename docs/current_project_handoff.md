@@ -734,3 +734,29 @@ with:
 `TSB = CTL - ATL`
 
 SPORT_LOAD should be investigated and implemented as a separate next batch.
+
+## SPORT_LOAD factual implementation — S001.3
+
+Status: IMPLEMENTED AND LIVE-VALIDATED
+
+SQLite schema v9 adds `sport_load_records`, one native daily row per `dayId`.
+Canonical fields preserve `generated_time_s`, `updated_time_ms`,
+`current_day_training_load`, conservative `wtl_sum`, native optimal bounds,
+the overreaching threshold, and device provenance. No status-category formula
+is implemented.
+
+`sync-db` now retrieves SPORT_LOAD through its dedicated
+`WatchSportStatistics / SPORT_LOAD` endpoint, follows native cursor
+pagination, and records `sport_load` in `sync_run_domains`. The
+SQLite-backed command is:
+
+```bash
+python3 zepp_health.py sport-load --days 30
+python3 zepp_health.py sport-load --days 30 --json
+```
+
+Production validation on 2026-07-29 inserted 7 recent rows. An identical
+second sync produced `inserted=0`, `updated=0`, `unchanged=7`. A bounded
+two-page historical validation stored 961 unique dates from 2023-11-01
+through 2026-07-29. SPORT_LOAD remains separate from Exertion ATL/CTL/TSB and
+is not integrated into TRC.

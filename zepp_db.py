@@ -18,7 +18,7 @@ from typing import Any, Iterator
 from zoneinfo import ZoneInfo
 
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 DEFAULT_DB_PATH = Path("data") / "zepp_health.db"
 _REMOVED_KEYS = {
     "app_token", "apptoken", "authorization", "cookie", "cookies",
@@ -39,6 +39,7 @@ FRESHNESS_DOMAINS = {
     "exertion": "exertion_records",
     "phn_record": "phn_daily_records",
     "stress": "stress_daily_records",
+    "sport_load": "sport_load_records",
 }
 MORNING_RECOVERY_DOMAINS = (
     "hrv",
@@ -648,6 +649,26 @@ CREATE INDEX IF NOT EXISTS idx_food_entries_meal_type
 ON food_entries(meal_type);
 """
 
+SCHEMA_V9_SQL = """
+CREATE TABLE IF NOT EXISTS sport_load_records (
+    record_key TEXT PRIMARY KEY,
+    event_date TEXT NOT NULL,
+    generated_time_s INTEGER,
+    updated_time_ms INTEGER,
+    current_day_training_load INTEGER,
+    wtl_sum INTEGER,
+    optimal_min INTEGER,
+    optimal_max INTEGER,
+    overreaching_threshold INTEGER,
+    device_source INTEGER,
+    source_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sport_load_event_date
+ON sport_load_records(event_date);
+"""
+
 
 class Database:
     def __init__(self, path: str | Path) -> None:
@@ -745,6 +766,99 @@ class Database:
                 )
                 self.connection.execute("PRAGMA user_version = 8")
                 current = 8
+            if current < 9:
+                self.connection.executescript(SCHEMA_V9_SQL)
+                self.connection.execute(
+                    "INSERT OR REPLACE INTO schema_meta(key, value) "
+                    "VALUES ('schema_version', '9')"
+                )
+                self.connection.execute("PRAGMA user_version = 9")
+                current = 9
+
+    def store_sport_load_rows(
+        self,
+        rows: list[dict[str, Any]],
+    ) -> dict[str, int]:
+        """Persist one factual SPORT_LOAD snapshot per native event_date."""
+        stats = {"inserted": 0, "updated": 0, "unchanged": 0}
+        now = utc_now()
+        factual_columns = (
+            "event_date", "generated_time_s", "updated_time_ms",
+            "current_day_training_load", "wtl_sum", "optimal_min",
+            "optimal_max", "overreaching_threshold", "device_source",
+        )
+        with self.transaction():
+            for row in rows:
+                event_date = row.get("event_date")
+                if not isinstance(event_date, str):
+                    continue
+                record_key = f"sport_load:{event_date}"
+                factual_values = tuple(row.get(column) for column in factual_columns)
+                source_json = json_text(row.get("raw") or {})
+                existing = self.connection.execute(
+                    "SELECT * FROM sport_load_records WHERE record_key=?",
+                    (record_key,),
+                ).fetchone()
+                if existing is None:
+                    self.connection.execute(
+                        """INSERT INTO sport_load_records (
+                            record_key, event_date, generated_time_s,
+                            updated_time_ms, current_day_training_load,
+                            wtl_sum, optimal_min, optimal_max,
+                            overreaching_threshold, device_source,
+                            source_json, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (record_key, *factual_values, source_json, now),
+                    )
+                    stats["inserted"] += 1
+                    continue
+                existing_factual = tuple(existing[column] for column in factual_columns)
+                if existing_factual == factual_values:
+                    stats["unchanged"] += 1
+                    if existing["source_json"] != source_json:
+                        self.connection.execute(
+                            "UPDATE sport_load_records SET source_json=? "
+                            "WHERE record_key=?",
+                            (source_json, record_key),
+                        )
+                    continue
+                self.connection.execute(
+                    """UPDATE sport_load_records SET
+                        event_date=?, generated_time_s=?, updated_time_ms=?,
+                        current_day_training_load=?, wtl_sum=?, optimal_min=?,
+                        optimal_max=?, overreaching_threshold=?,
+                        device_source=?, source_json=?, updated_at=?
+                       WHERE record_key=?""",
+                    (*factual_values, source_json, now, record_key),
+                )
+                stats["updated"] += 1
+        return stats
+
+    def fetch_sport_load(
+        self,
+        from_date: str,
+        to_date: str,
+    ) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """SELECT event_date AS date, generated_time_s, updated_time_ms,
+                      current_day_training_load, wtl_sum, optimal_min,
+                      optimal_max, overreaching_threshold, device_source
+               FROM sport_load_records
+               WHERE event_date BETWEEN ? AND ?
+               ORDER BY event_date DESC""",
+            (from_date, to_date),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def fetch_latest_sport_load(self) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            """SELECT event_date AS date, generated_time_s, updated_time_ms,
+                      current_day_training_load, wtl_sum, optimal_min,
+                      optimal_max, overreaching_threshold, device_source
+               FROM sport_load_records
+               ORDER BY event_date DESC LIMIT 1"""
+        ).fetchone()
+        return dict(row) if row is not None else None
 
     def store_food_rows(
         self,
@@ -2224,6 +2338,7 @@ def inspect_database_file(path: str | Path) -> dict[str, Any]:
             "hrv_samples", "hrv_daily", "wake_energy", "exertion_records",
             "stress_daily_records",
             "stress_samples",
+            "food_entries", "sport_load_records",
             "readiness_records", "sleep_related_readiness", "charge_records",
             "insight_records", "lifeload_records", "phn_daily_records", "phn_training_plans", "raw_payloads", "sync_runs",
             "sync_run_domains",

@@ -72,8 +72,8 @@ python3 zepp_health.py temperature --days 14
 # Heart rate samples
 python3 zepp_health.py heart-rate --days 7
 
-# Daily training load
-python3 zepp_health.py sport-load --days 30
+# Persisted factual SPORT_LOAD (run sync-db first)
+python3 zepp_health.py sport-load --days 30 --json
 
 # Weight, VO2 max, workouts
 python3 zepp_health.py weight --days 90
@@ -233,7 +233,7 @@ All data requests are **GET**s to your regional `host`, with header `apptoken: <
 
 | Subcommand | Endpoint |
 |---|---|
-| `sport-load` | `GET /v2/watch/users/{id}/WatchSportStatistics/SPORT_LOAD` |
+| `sync-db` SPORT_LOAD domain | `GET /v2/watch/users/{id}/WatchSportStatistics/SPORT_LOAD` |
 | `vo2` | `GET /v2/watch/users/{id}/WatchSportStatistics/VO2_MAX` |
 | `heart-rate` | `GET /users/{id}/heartRate` |
 | `weight` | `GET /users/{id}/members/-1/weightRecords` |

@@ -20,11 +20,55 @@ from zepp_health import (
     _normalize_value_records,
     food_meal_label,
     normalize_food_data,
+    normalize_sport_load_data,
     normalize_stress_data,
 )
 
 
 class NativeMetricsTests(unittest.TestCase):
+    def test_sport_load_same_day_fixture_and_numeric_strings(self) -> None:
+        payload = {"items": [{
+            "dayId": "2026-07-29",
+            "generatedTime": "1785283200",
+            "updateTime": "1785276000000",
+            "currnetDayTrainLoad": "0",
+            "wtlSum": "432",
+            "wtlSumOptimalMin": "261",
+            "wtlSumOptimalMax": "607",
+            "wtlSumOverreaching": "735",
+            "device_source": "9568513",
+            "futureField": {"preserved": True},
+        }]}
+        rows = normalize_sport_load_data(payload)
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["event_date"], "2026-07-29")
+        self.assertEqual(row["generated_time_s"], 1785283200)
+        self.assertEqual(row["updated_time_ms"], 1785276000000)
+        self.assertEqual(row["current_day_training_load"], 0)
+        self.assertEqual(row["wtl_sum"], 432)
+        self.assertEqual(row["optimal_min"], 261)
+        self.assertEqual(row["optimal_max"], 607)
+        self.assertEqual(row["overreaching_threshold"], 735)
+        self.assertEqual(row["device_source"], 9568513)
+        self.assertIn("futureField", row["raw"])
+        self.assertNotIn("atl", row)
+        self.assertNotIn("ctl", row)
+        self.assertNotIn("tsb", row)
+
+    def test_sport_load_missing_and_invalid_values_remain_none(self) -> None:
+        row = normalize_sport_load_data({"items": [{
+            "dayId": "2026-07-28",
+            "generatedTime": "invalid",
+            "currnetDayTrainLoad": None,
+        }]})[0]
+        for field in (
+            "generated_time_s", "updated_time_ms",
+            "current_day_training_load", "wtl_sum", "optimal_min",
+            "optimal_max", "overreaching_threshold", "device_source",
+        ):
+            self.assertIsNone(row[field])
+
     def test_food_banana_fixture_normalization(self) -> None:
         payload = {"items": [{
             "eventType": "Food",

@@ -619,6 +619,22 @@ The exact Resting source/algorithm remains unresolved.
 A new `WatchSportStatistics / SPORT_LOAD` contract was also discovered and is
 reserved as the next dedicated training-load batch.
 
+## S001 — SPORT_LOAD factual support
+
+S001.1 inventoried the production endpoint, historical corpus, activity-load
+relationship, and separation from Exertion. S001.2 directly read the
+2026-07-29 row and confirmed that `wtlSum=432` lay inside its native
+`261..607` range while the UI reported `Optimal`; the observation is a
+consistent range, not a complete status algorithm.
+
+S001.3 implements the factual domain with schema v9, canonical normalization,
+one-row-per-date idempotent persistence, cursor pagination, bounded
+incremental sync, SQLite reads, factual freshness, and the `sport-load` CLI.
+Production validation inserted 7 recent rows and an identical second sync
+left all 7 unchanged. A limited historical validation followed two pages and
+stored 961 unique dates. WTL remains conservatively named `wtl_sum`, separate
+from ATL/CTL/TSB, with no TRC integration.
+
 
 ## I001 — Native Stress implementation
 

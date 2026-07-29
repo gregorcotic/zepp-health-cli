@@ -27,6 +27,7 @@ python3 zepp_health.py daily-status --days 14 --from-db
 python3 zepp_health.py stress --days 7 --db data/zepp_health.db
 python3 zepp_health.py stress --days 1 --samples --db data/zepp_health.db --json
 python3 zepp_health.py food --days 7 --db data/zepp_health.db --json
+python3 zepp_health.py sport-load --days 30 --db data/zepp_health.db --json
 python3 zepp_health.py sync-activities --days 7 --db data/zepp_health.db
 python3 zepp_health.py activity-status --db data/zepp_health.db
 ```
@@ -55,6 +56,9 @@ normalized records and raw payload insertion use a SQLite transaction.
 - `food_entries`: canonical native `Food / real_data` entries keyed by stable
   `foodLogId`, with factual meal, amount, energy, nutrient, and recognition
   fields plus sanitized internal source evidence.
+- `sport_load_records`: one native `WatchSportStatistics / SPORT_LOAD`
+  snapshot per `event_date`, including the conservative `wtl_sum`, native
+  daily load, thresholds, timestamps, and device provenance.
 - `activities` and `activity_summary_metrics`: canonical native activity
   identity/time and factual metric envelopes.
 - `activity_streams` and `activity_samples`: independently sampled native GPS,
@@ -84,7 +88,7 @@ sidecar files.
 
 ## Migrations and deployment
 
-The current database schema version is 8. Future compatible schema
+The current database schema version is 9. Future compatible schema
 changes must increment the migration version and apply transactional migrations
 before normal reads/writes. The database is runtime state, not source code:
 
@@ -292,3 +296,30 @@ device-staleness judgment.
 
 No audited native daily nutrition summary is implemented. The CLI labels
 daily totals unavailable and does not silently sum entries or invent zeros.
+
+## SPORT_LOAD persistence and reads
+
+Schema v9 adds `sport_load_records`, keyed uniquely by native `dayId` stored as
+`event_date`. Native `generatedTime` remains epoch seconds and `updateTime`
+remains epoch milliseconds. The factual fields are:
+
+- `current_day_training_load` from native `currnetDayTrainLoad`;
+- conservative `wtl_sum` from native `wtlSum`;
+- `optimal_min`, `optimal_max`, and `overreaching_threshold`;
+- optional `device_source`.
+
+The exact WTL expansion, unit, formula, rolling window, and complete status
+algorithm remain unknown. ATL, CTL, and TSB remain separate Exertion facts.
+The database does not derive status categories or recompute daily load from
+activities.
+
+`sync-db` uses the dedicated WatchSportStatistics endpoint with a bounded
+requested-day overlap. Historical backfill follows the native `next` cursor,
+deduplicates page-boundary dates, and persists one row per date. Raw-only
+source changes remain factually unchanged; changes to native fields update the
+existing dated row.
+
+The `sport-load` command reads SQLite only. Freshness uses the
+Europe/Ljubljana calendar: newest `event_date` today is `current`, an older
+date is `stale`, and no rows is `missing`. It does not use `updateTime` to
+override a current factual date.

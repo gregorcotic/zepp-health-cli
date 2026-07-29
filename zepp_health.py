@@ -177,15 +177,25 @@ class ZeppClient:
         r.raise_for_status()
         return r.json()
 
-    def sport_load(self, start_day: date, end_day: date) -> Any:
+    def sport_load(
+        self,
+        start_day: date,
+        end_day: date,
+        *,
+        limit: int = 900,
+        next_cursor: int | None = None,
+    ) -> Any:
+        params: dict[str, Any] = {
+            "startDay": start_day.isoformat(),
+            "endDay": end_day.isoformat(),
+            "limit": limit,
+            "isReverse": "true",
+        }
+        if next_cursor is not None:
+            params["next"] = next_cursor
         return self.get_json(
             f"/v2/watch/users/{self.user_id}/WatchSportStatistics/SPORT_LOAD",
-            {
-                "startDay": start_day.isoformat(),
-                "endDay": end_day.isoformat(),
-                "limit": 900,
-                "isReverse": "true",
-            },
+            params,
         )
 
     def vo2_max(self, start_day: date, end_day: date) -> Any:
@@ -576,14 +586,6 @@ def cmd_config(args: argparse.Namespace) -> None:
             print(p, "(exists)" if p.is_file() else "")
         return
     sys.exit("Use --show or --path")
-
-
-def cmd_sport_load(args: argparse.Namespace) -> None:
-    c = _load_client()
-    end = _today_utc()
-    start = end - timedelta(days=args.days - 1)
-    data = c.sport_load(start, end)
-    _emit_json(data, args)
 
 
 def cmd_vo2(args: argparse.Namespace) -> None:
@@ -4392,6 +4394,48 @@ def normalize_food_data(payload: Any) -> list[dict[str, Any]]:
     return normalized
 
 
+def normalize_sport_load_data(payload: Any) -> list[dict[str, Any]]:
+    """Normalize factual WatchSportStatistics/SPORT_LOAD daily rows."""
+    if not isinstance(payload, dict):
+        return []
+    items = payload.get("items")
+    if not isinstance(items, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    for native in items:
+        if not isinstance(native, dict):
+            continue
+        event_date = native.get("dayId")
+        if not isinstance(event_date, str):
+            continue
+        try:
+            date.fromisoformat(event_date)
+        except ValueError:
+            continue
+        rows.append({
+            "event_date": event_date,
+            "generated_time_s": _int_or_none(native.get("generatedTime")),
+            "updated_time_ms": _int_or_none(native.get("updateTime")),
+            "current_day_training_load": _int_or_none(
+                native.get("currnetDayTrainLoad")
+            ),
+            "wtl_sum": _int_or_none(native.get("wtlSum")),
+            "optimal_min": _int_or_none(native.get("wtlSumOptimalMin")),
+            "optimal_max": _int_or_none(native.get("wtlSumOptimalMax")),
+            "overreaching_threshold": _int_or_none(
+                native.get("wtlSumOverreaching")
+            ),
+            "device_source": _int_or_none(native.get("device_source")),
+            "provenance": {
+                "method": "GET",
+                "path": "/v2/watch/users/{id}/WatchSportStatistics/SPORT_LOAD",
+                "confidence": "production_confirmed",
+            },
+            "raw": native,
+        })
+    return rows
+
+
 def normalize_stress_data(payload):
     """Normalize native Zepp ``all_day_stress`` events.
 
@@ -5694,6 +5738,42 @@ SYNC_DOMAIN_SPECS: tuple[tuple[str, str, str, Any], ...] = (
 )
 
 
+def fetch_sport_load_pages(
+    client: ZeppClient,
+    start_day: date,
+    end_day: date,
+    *,
+    limit: int = 900,
+    max_pages: int = 100,
+) -> tuple[list[dict[str, Any]], int]:
+    """Fetch cursor-paginated SPORT_LOAD rows and deduplicate by event date."""
+    cursor: int | None = None
+    seen_cursors: set[int] = set()
+    by_date: dict[str, dict[str, Any]] = {}
+    pages = 0
+    while pages < max_pages:
+        payload = client.sport_load(
+            start_day,
+            end_day,
+            limit=limit,
+            next_cursor=cursor,
+        )
+        pages += 1
+        for row in normalize_sport_load_data(payload):
+            by_date.setdefault(row["event_date"], row)
+        next_value = payload.get("next") if isinstance(payload, dict) else None
+        next_cursor = _int_or_none(next_value)
+        if next_cursor is None:
+            break
+        if next_cursor in seen_cursors:
+            raise RuntimeError("SPORT_LOAD pagination cursor repeated")
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+    else:
+        raise RuntimeError("SPORT_LOAD pagination exceeded page limit")
+    return sorted(by_date.values(), key=lambda row: row["event_date"]), pages
+
+
 def _sync_summary_result(
     domain: str,
     event_type: str,
@@ -5844,6 +5924,41 @@ def sync_native_metrics(
         domains.append(result)
         database.record_sync_domain(run_id, result)
 
+        domain = "sport_load"
+        event_type = "WatchSportStatistics"
+        sub_type = "SPORT_LOAD"
+        local_today = datetime.now(
+            timezone.utc
+        ).astimezone(ZoneInfo(FRESHNESS_TIMEZONE)).date()
+        start_day = local_today - timedelta(days=days - 1)
+        try:
+            rows, pages = fetch_sport_load_pages(
+                client,
+                start_day,
+                local_today,
+                limit=min(limit, 900),
+            )
+            counts = database.store_sport_load_rows(rows)
+            result = _sync_summary_result(
+                domain,
+                event_type,
+                sub_type,
+                status="ok" if rows else "empty",
+                records_retrieved=len(rows),
+                **counts,
+            )
+            result["pages"] = pages
+        except Exception as exc:
+            result = _sync_summary_result(
+                domain,
+                event_type,
+                sub_type,
+                status="error",
+                error=type(exc).__name__,
+            )
+        domains.append(result)
+        database.record_sync_domain(run_id, result)
+
         error_count = sum(row["status"] == "error" for row in domains)
         status = "error" if error_count == len(domains) else "partial" if error_count else "ok"
         summary = {
@@ -5950,6 +6065,47 @@ def backfill_native_metrics(
                 **domains[-1], "status": status, "inserted": totals["inserted"],
                 "updated": totals["updated"], "unchanged": totals["unchanged"],
             })
+        domain = "sport_load"
+        event_type = "WatchSportStatistics"
+        sub_type = "SPORT_LOAD"
+        try:
+            rows, pages = fetch_sport_load_pages(
+                client,
+                target_from,
+                today,
+                limit=min(limit, 900),
+            )
+            counts = database.store_sport_load_rows(rows)
+            sport_result = _historical_domain_result(
+                domain,
+                event_type,
+                sub_type,
+                status="complete",
+                target_from_date=target_from_text,
+                cursor_to_date=target_from_text,
+                records_retrieved=len(rows),
+                pages=pages,
+                chunks_completed=pages,
+                **counts,
+            )
+        except Exception as exc:
+            sport_result = _historical_domain_result(
+                domain,
+                event_type,
+                sub_type,
+                status="error",
+                target_from_date=target_from_text,
+                cursor_to_date=today.isoformat(),
+                records_retrieved=0,
+                inserted=0,
+                updated=0,
+                unchanged=0,
+                pages=0,
+                chunks_completed=0,
+                error=type(exc).__name__,
+            )
+        domains.append(sport_result)
+        database.record_sync_domain(run_id, sport_result)
         status = "ok" if not any(row["status"] == "error" for row in domains) else "partial"
         summary = {"requested_days": days, "from_ms": run_from, "to_ms": run_to,
                    "database_path": str(database.path), "job_key": job_key, "chunk_days": chunk_days,
@@ -6089,6 +6245,68 @@ def cmd_stress(args: argparse.Namespace) -> None:
             )
     if args.samples:
         print(f"Stored samples in window: {len(result['samples'])}")
+
+
+def read_sport_load_report(
+    database: Database,
+    days: int,
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Build a factual, raw-payload-free SPORT_LOAD report from SQLite."""
+    if days < 1:
+        raise ValueError("days must be at least 1")
+    instant = now or datetime.now(timezone.utc)
+    local_today = instant.astimezone(ZoneInfo(FRESHNESS_TIMEZONE)).date()
+    from_date = (local_today - timedelta(days=days - 1)).isoformat()
+    to_date = local_today.isoformat()
+    latest = database.fetch_latest_sport_load()
+    if latest is None:
+        freshness = "missing"
+    elif latest["date"] == to_date:
+        freshness = "current"
+    else:
+        freshness = "stale"
+    return {
+        "status": "ok",
+        "timezone": FRESHNESS_TIMEZONE,
+        "from_date": from_date,
+        "to_date": to_date,
+        "freshness": freshness,
+        "latest": latest,
+        "days": database.fetch_sport_load(from_date, to_date),
+    }
+
+
+def cmd_sport_load(args: argparse.Namespace) -> None:
+    database = Database(_db_path_from_args(args))
+    try:
+        result = read_sport_load_report(database, args.days)
+    finally:
+        database.close()
+    if args.json:
+        _emit_json(result, args)
+        return
+    print("SPORT_LOAD — latest")
+    latest = result["latest"]
+    if latest is None:
+        print("No stored SPORT_LOAD data.")
+        print("Freshness: missing")
+        return
+    print(f"Date: {latest['date']}")
+    print(f"Current-day load: {latest['current_day_training_load']}")
+    print(f"WTL sum: {latest['wtl_sum']}")
+    print(f"Optimal range: {latest['optimal_min']}–{latest['optimal_max']}")
+    print(f"Overreaching threshold: {latest['overreaching_threshold']}")
+    print(f"Freshness: {result['freshness']}")
+    if result["days"]:
+        print("Daily history:")
+        for row in result["days"]:
+            print(
+                f"  {row['date']}: current-day {row['current_day_training_load']}, "
+                f"WTL {row['wtl_sum']}, range "
+                f"{row['optimal_min']}–{row['optimal_max']}"
+            )
 
 
 def read_food_report(
@@ -6536,9 +6754,13 @@ def main() -> None:
     sp.add_argument("--limit", type=int, default=2000)
     sp.set_defaults(func=cmd_sync_phn)
 
-    sp = sub.add_parser("sport-load", help="Daily training load (WatchSportStatistics)")
+    sp = sub.add_parser(
+        "sport-load",
+        help="Factual SPORT_LOAD daily data from SQLite",
+    )
     _add_days(sp)
     _add_json(sp)
+    _add_db(sp)
     sp.set_defaults(func=cmd_sport_load)
 
     sp = sub.add_parser("vo2", help="VO2 max series (may be empty)")

@@ -4,7 +4,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
@@ -22,7 +22,12 @@ from zepp_db import (
     resolve_db_path,
     restore_database,
 )
-from zepp_health import backfill_native_metrics, sync_native_metrics
+from zepp_health import (
+    backfill_native_metrics,
+    fetch_sport_load_pages,
+    read_sport_load_report,
+    sync_native_metrics,
+)
 from zepp_ops import SyncLock, lock_is_held
 
 
@@ -36,6 +41,12 @@ class FakeClient:
         if key in self.failures:
             raise requests.ConnectionError("fixture network failure")
         return copy.deepcopy(self.responses[key])
+
+    def sport_load(self, start_day, end_day, *, limit=900, next_cursor=None):
+        key = ("WatchSportStatistics", "SPORT_LOAD")
+        if key in self.failures:
+            raise requests.ConnectionError("fixture network failure")
+        return copy.deepcopy(self.responses.get(key, {"items": []}))
 
 
 def fixture_responses():
@@ -87,6 +98,7 @@ def fixture_responses():
         "items": []
     },
         ("Food", "real_data"): {"items": []},
+        ("WatchSportStatistics", "SPORT_LOAD"): {"items": []},
 }
 
 
@@ -1275,7 +1287,7 @@ class DatabaseTests(unittest.TestCase):
             db = Database(path)
             self.assertEqual(db.connection.execute(
                 "PRAGMA user_version"
-            ).fetchone()[0], 8)
+            ).fetchone()[0], 9)
             indexes = {
                 row["name"] for row in db.connection.execute(
                     "PRAGMA index_list(food_entries)"
@@ -1329,7 +1341,7 @@ class DatabaseTests(unittest.TestCase):
             migrated = Database(path)
             self.assertEqual(migrated.connection.execute(
                 "PRAGMA user_version"
-            ).fetchone()[0], 8)
+            ).fetchone()[0], 9)
             self.assertIsNotNone(migrated.connection.execute(
                 "SELECT name FROM sqlite_master "
                 "WHERE type='table' AND name='food_entries'"
@@ -1445,6 +1457,223 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(food["updated"], 0)
             self.assertEqual(food["unchanged"], 1)
             db.close()
+
+    def test_sport_load_schema_v9_persistence_reads_and_freshness(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "sport-load.db"
+            db = Database(path)
+            self.assertEqual(db.connection.execute(
+                "PRAGMA user_version"
+            ).fetchone()[0], 9)
+            self.assertIsNotNone(db.connection.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name='sport_load_records'"
+            ).fetchone())
+            indexes = {
+                row["name"] for row in db.connection.execute(
+                    "PRAGMA index_list(sport_load_records)"
+                ).fetchall()
+            }
+            self.assertIn("idx_sport_load_event_date", indexes)
+            base = {
+                "event_date": "2026-07-29",
+                "generated_time_s": 1785283200,
+                "updated_time_ms": 1785276000000,
+                "current_day_training_load": 0,
+                "wtl_sum": 432,
+                "optimal_min": 261,
+                "optimal_max": 607,
+                "overreaching_threshold": 735,
+                "device_source": 9568513,
+                "raw": {"dayId": "2026-07-29", "transport": "a"},
+            }
+            older = {**base, "event_date": "2026-07-28", "wtl_sum": 420}
+            self.assertEqual(
+                db.store_sport_load_rows([older, base]),
+                {"inserted": 2, "updated": 0, "unchanged": 0},
+            )
+            changed_raw = copy.deepcopy(base)
+            changed_raw["raw"]["transport"] = "b"
+            self.assertEqual(
+                db.store_sport_load_rows([changed_raw]),
+                {"inserted": 0, "updated": 0, "unchanged": 1},
+            )
+            corrected = copy.deepcopy(changed_raw)
+            corrected["current_day_training_load"] = 12
+            corrected["wtl_sum"] = 444
+            self.assertEqual(
+                db.store_sport_load_rows([corrected]),
+                {"inserted": 0, "updated": 1, "unchanged": 0},
+            )
+            self.assertEqual(db.connection.execute(
+                "SELECT COUNT(*) FROM sport_load_records"
+            ).fetchone()[0], 2)
+            rows = db.fetch_sport_load("2026-07-28", "2026-07-29")
+            self.assertEqual([row["date"] for row in rows], [
+                "2026-07-29", "2026-07-28",
+            ])
+            self.assertEqual(db.fetch_latest_sport_load()["wtl_sum"], 444)
+            current = db.factual_freshness(
+                datetime(2026, 7, 29, 8, 0, tzinfo=timezone.utc)
+            )["domain_data_freshness"]["sport_load"]
+            self.assertEqual(current["latest_date"], "2026-07-29")
+            self.assertEqual(current["freshness"], "current")
+            self.assertEqual(read_sport_load_report(
+                db, 7, now=datetime(2026, 7, 29, 8, 0, tzinfo=timezone.utc)
+            )["freshness"], "current")
+            self.assertEqual(read_sport_load_report(
+                db, 7, now=datetime(2026, 7, 30, 8, 0, tzinfo=timezone.utc)
+            )["freshness"], "stale")
+            db.connection.execute("DROP TABLE sport_load_records")
+            db.connection.execute("PRAGMA user_version = 8")
+            db.connection.commit()
+            db.close()
+            migrated = Database(path)
+            self.assertEqual(migrated.connection.execute(
+                "PRAGMA user_version"
+            ).fetchone()[0], 9)
+            self.assertEqual(
+                read_sport_load_report(
+                    migrated,
+                    7,
+                    now=datetime(2026, 7, 29, 8, 0, tzinfo=timezone.utc),
+                )["freshness"],
+                "missing",
+            )
+            migrated.close()
+
+    def test_sport_load_pagination_deduplicates_and_terminates(self) -> None:
+        class PageClient:
+            def __init__(self):
+                self.cursors = []
+
+            def sport_load(self, start_day, end_day, *, limit=900, next_cursor=None):
+                self.cursors.append(next_cursor)
+                if next_cursor is None:
+                    return {
+                        "items": [
+                            {"dayId": "2026-07-29", "wtlSum": 432},
+                            {"dayId": "2026-07-28", "wtlSum": 420},
+                        ],
+                        "next": "123",
+                    }
+                return {"items": [
+                    {"dayId": "2026-07-28", "wtlSum": 999},
+                    {"dayId": "2026-07-27", "wtlSum": 410},
+                ]}
+
+        client = PageClient()
+        rows, pages = fetch_sport_load_pages(
+            client, date(2026, 7, 27), date(2026, 7, 29)
+        )
+        self.assertEqual(pages, 2)
+        self.assertEqual(client.cursors, [None, 123])
+        self.assertEqual([row["event_date"] for row in rows], [
+            "2026-07-27", "2026-07-28", "2026-07-29",
+        ])
+        self.assertEqual(rows[1]["wtl_sum"], 420)
+        empty_rows, empty_pages = fetch_sport_load_pages(
+            FakeClient(fixture_responses()),
+            date(2026, 7, 29),
+            date(2026, 7, 29),
+        )
+        self.assertEqual((empty_rows, empty_pages), ([], 1))
+
+    def test_sport_load_empty_and_failure_are_isolated(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            db = Database(Path(directory) / "isolated.db")
+            empty = sync_native_metrics(FakeClient(fixture_responses()), db, 1)
+            sport = next(row for row in empty["domains"]
+                         if row["domain"] == "sport_load")
+            self.assertEqual(sport["status"], "empty")
+            responses = fixture_responses()
+            failed = sync_native_metrics(
+                FakeClient(
+                    responses,
+                    {("WatchSportStatistics", "SPORT_LOAD")},
+                ),
+                db,
+                1,
+            )
+            sport = next(row for row in failed["domains"]
+                         if row["domain"] == "sport_load")
+            self.assertEqual(sport["status"], "error")
+            self.assertGreater(
+                db.connection.execute(
+                    "SELECT COUNT(*) FROM hrv_samples"
+                ).fetchone()[0],
+                0,
+            )
+            db.close()
+
+    def test_sport_load_sync_idempotency_correction_and_cli_privacy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "sport-load-sync.db"
+            db = Database(path)
+            responses = fixture_responses()
+            fixture = {
+                "dayId": datetime.now(
+                    ZoneInfo("Europe/Ljubljana")
+                ).date().isoformat(),
+                "generatedTime": 1785283200,
+                "updateTime": 1785276000000,
+                "currnetDayTrainLoad": 0,
+                "wtlSum": 432,
+                "wtlSumOptimalMin": 261,
+                "wtlSumOptimalMax": 607,
+                "wtlSumOverreaching": 735,
+                "device_source": 9568513,
+                "privateTransport": "must-not-leak",
+            }
+            responses[("WatchSportStatistics", "SPORT_LOAD")] = {
+                "items": [fixture]
+            }
+            first = sync_native_metrics(FakeClient(responses), db, 7)
+            sport = next(row for row in first["domains"]
+                         if row["domain"] == "sport_load")
+            self.assertEqual(sport["inserted"], 1)
+            second = sync_native_metrics(FakeClient(responses), db, 7)
+            sport = next(row for row in second["domains"]
+                         if row["domain"] == "sport_load")
+            self.assertEqual(
+                (sport["inserted"], sport["updated"], sport["unchanged"]),
+                (0, 0, 1),
+            )
+            fixture["wtlSum"] = 440
+            third = sync_native_metrics(FakeClient(responses), db, 7)
+            sport = next(row for row in third["domains"]
+                         if row["domain"] == "sport_load")
+            self.assertEqual(sport["updated"], 1)
+            accounting = db.connection.execute(
+                "SELECT status FROM sync_run_domains "
+                "WHERE domain='sport_load' ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            self.assertEqual(accounting["status"], "ok")
+            db.close()
+            completed = subprocess.run(
+                [
+                    sys.executable, "zepp_health.py", "sport-load",
+                    "--days", "7", "--db", str(path), "--json",
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            result = json.loads(completed.stdout)
+            self.assertEqual(result["latest"]["wtl_sum"], 440)
+            self.assertEqual(result["freshness"], "current")
+            self.assertNotIn("source_json", completed.stdout)
+            self.assertNotIn("privateTransport", completed.stdout)
+            human = subprocess.run(
+                [
+                    sys.executable, "zepp_health.py", "sport-load",
+                    "--days", "7", "--db", str(path),
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertIn("WTL sum: 440", human.stdout)
 
 
 if __name__ == "__main__":
