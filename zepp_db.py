@@ -18,7 +18,7 @@ from typing import Any, Iterator
 from zoneinfo import ZoneInfo
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 DEFAULT_DB_PATH = Path("data") / "zepp_health.db"
 _REMOVED_KEYS = {
     "app_token", "apptoken", "authorization", "cookie", "cookies",
@@ -38,6 +38,7 @@ FRESHNESS_DOMAINS = {
     "wake_energy": "wake_energy",
     "exertion": "exertion_records",
     "phn_record": "phn_daily_records",
+    "stress": "stress_daily_records",
 }
 MORNING_RECOVERY_DOMAINS = (
     "hrv",
@@ -573,6 +574,45 @@ CREATE INDEX IF NOT EXISTS idx_phn_training_plan_date
 """
 
 
+
+SCHEMA_V7_SQL = """
+CREATE TABLE IF NOT EXISTS stress_daily_records (
+    record_key TEXT PRIMARY KEY,
+    event_date TEXT NOT NULL,
+    timestamp_ms INTEGER,
+    min_stress INTEGER,
+    max_stress INTEGER,
+    avg_stress INTEGER,
+    relax_proportion INTEGER,
+    normal_proportion INTEGER,
+    medium_proportion INTEGER,
+    high_proportion INTEGER,
+    sample_count INTEGER NOT NULL DEFAULT 0,
+    source_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_stress_daily_event_date
+ON stress_daily_records(event_date);
+
+CREATE TABLE IF NOT EXISTS stress_samples (
+    record_key TEXT PRIMARY KEY,
+    event_date TEXT NOT NULL,
+    timestamp_ms INTEGER NOT NULL,
+    stress INTEGER NOT NULL,
+    category TEXT NOT NULL,
+    source_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_stress_samples_timestamp
+ON stress_samples(timestamp_ms);
+
+CREATE INDEX IF NOT EXISTS idx_stress_samples_event_date
+ON stress_samples(event_date);
+"""
+
+
 class Database:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path).expanduser()
@@ -653,6 +693,353 @@ class Database:
                 )
                 self.connection.execute("PRAGMA user_version = 6")
                 current = 6
+            if current < 7:
+                self.connection.executescript(SCHEMA_V7_SQL)
+                self.connection.execute(
+                    "INSERT OR REPLACE INTO schema_meta(key, value) "
+                    "VALUES ('schema_version', '7')"
+                )
+                self.connection.execute("PRAGMA user_version = 7")
+                current = 7
+
+
+    def store_stress_rows(
+        self,
+        rows: list[dict[str, Any]],
+    ) -> dict[str, int]:
+        """Persist normalized all_day_stress daily rows and sparse samples.
+
+        Daily rows are keyed by local event date.
+        Samples are keyed by their native measurement timestamp.
+
+        The method intentionally does not synthesize missing five-minute
+        samples. Native daily aggregates remain authoritative.
+        """
+        stats = {
+            "daily_inserted": 0,
+            "daily_updated": 0,
+            "daily_unchanged": 0,
+            "samples_inserted": 0,
+            "samples_updated": 0,
+            "samples_unchanged": 0,
+        }
+
+        now = utc_now()
+
+        with self.transaction():
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+
+                event_date = row.get("date")
+                if not event_date:
+                    continue
+
+                event_timestamp_ms = row.get("event_timestamp_ms")
+
+                daily_key = f"all_day_stress:{event_date}"
+
+                daily_values = (
+                    event_date,
+                    event_timestamp_ms,
+                    row.get("min_stress"),
+                    row.get("max_stress"),
+                    row.get("avg_stress"),
+                    row.get("relax_proportion"),
+                    row.get("normal_proportion"),
+                    row.get("medium_proportion"),
+                    row.get("high_proportion"),
+                    int(row.get("sample_count") or 0),
+                    json_text(row.get("raw") or {}),
+                )
+
+                existing = self.connection.execute(
+                    """
+                    SELECT
+                        event_date,
+                        timestamp_ms,
+                        min_stress,
+                        max_stress,
+                        avg_stress,
+                        relax_proportion,
+                        normal_proportion,
+                        medium_proportion,
+                        high_proportion,
+                        sample_count,
+                        source_json
+                    FROM stress_daily_records
+                    WHERE record_key=?
+                    """,
+                    (daily_key,),
+                ).fetchone()
+
+                if existing is None:
+                    self.connection.execute(
+                        """
+                        INSERT INTO stress_daily_records (
+                            record_key,
+                            event_date,
+                            timestamp_ms,
+                            min_stress,
+                            max_stress,
+                            avg_stress,
+                            relax_proportion,
+                            normal_proportion,
+                            medium_proportion,
+                            high_proportion,
+                            sample_count,
+                            source_json,
+                            updated_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (daily_key, *daily_values, now),
+                    )
+                    stats["daily_inserted"] += 1
+
+                else:
+                    existing_values = tuple(existing)
+
+                    # source_json is provenance/raw evidence and may contain
+                    # volatile Zepp metadata. It must not turn an otherwise
+                    # identical factual Stress snapshot into a logical update.
+                    # Factual Stress identity intentionally excludes:
+                    #
+                    # - timestamp_ms: snapshot/event transport metadata
+                    # - source_json: raw/provenance evidence
+                    #
+                    # Native Stress facts are the daily aggregates and
+                    # sample_count.
+                    existing_factual = (
+                        existing["event_date"],
+                        existing["min_stress"],
+                        existing["max_stress"],
+                        existing["avg_stress"],
+                        existing["relax_proportion"],
+                        existing["normal_proportion"],
+                        existing["medium_proportion"],
+                        existing["high_proportion"],
+                        existing["sample_count"],
+                    )
+
+                    incoming_factual = (
+                        event_date,
+                        row.get("min_stress"),
+                        row.get("max_stress"),
+                        row.get("avg_stress"),
+                        row.get("relax_proportion"),
+                        row.get("normal_proportion"),
+                        row.get("medium_proportion"),
+                        row.get("high_proportion"),
+                        int(row.get("sample_count") or 0),
+                    )
+
+                    if existing_factual == incoming_factual:
+                        stats["daily_unchanged"] += 1
+
+                        # Preserve the newest raw evidence without changing
+                        # factual update semantics.
+                        if (
+                            existing_values[1] != daily_values[1]
+                            or existing_values[-1] != daily_values[-1]
+                        ):
+                            self.connection.execute(
+                                """
+                                UPDATE stress_daily_records
+                                SET
+                                    timestamp_ms=?,
+                                    source_json=?
+                                WHERE record_key=?
+                                """,
+                                (
+                                    daily_values[1],
+                                    daily_values[-1],
+                                    daily_key,
+                                ),
+                            )
+                    else:
+                        self.connection.execute(
+                            """
+                            UPDATE stress_daily_records
+                            SET
+                                event_date=?,
+                                timestamp_ms=?,
+                                min_stress=?,
+                                max_stress=?,
+                                avg_stress=?,
+                                relax_proportion=?,
+                                normal_proportion=?,
+                                medium_proportion=?,
+                                high_proportion=?,
+                                sample_count=?,
+                                source_json=?,
+                                updated_at=?
+                            WHERE record_key=?
+                            """,
+                            (*daily_values, now, daily_key),
+                        )
+                        stats["daily_updated"] += 1
+
+                provenance = row.get("provenance") or {}
+
+                for sample in row.get("samples") or []:
+                    if not isinstance(sample, dict):
+                        continue
+
+                    timestamp_ms = sample.get("timestamp_ms")
+                    stress = sample.get("stress")
+                    category = sample.get("category")
+
+                    if not isinstance(timestamp_ms, int):
+                        continue
+
+                    if not isinstance(stress, int):
+                        continue
+
+                    if not isinstance(category, str):
+                        continue
+
+                    sample_key = f"all_day_stress:{timestamp_ms}"
+
+                    sample_source = json_text(
+                        {
+                            "sample": sample,
+                            "provenance": provenance,
+                        }
+                    )
+
+                    sample_values = (
+                        event_date,
+                        timestamp_ms,
+                        stress,
+                        category,
+                        sample_source,
+                    )
+
+                    existing_sample = self.connection.execute(
+                        """
+                        SELECT
+                            event_date,
+                            timestamp_ms,
+                            stress,
+                            category,
+                            source_json
+                        FROM stress_samples
+                        WHERE record_key=?
+                        """,
+                        (sample_key,),
+                    ).fetchone()
+
+                    if existing_sample is None:
+                        self.connection.execute(
+                            """
+                            INSERT INTO stress_samples (
+                                record_key,
+                                event_date,
+                                timestamp_ms,
+                                stress,
+                                category,
+                                source_json,
+                                updated_at
+                            )
+                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (sample_key, *sample_values, now),
+                        )
+                        stats["samples_inserted"] += 1
+
+                    else:
+                        existing_values = tuple(existing_sample)
+
+                        if existing_values == sample_values:
+                            stats["samples_unchanged"] += 1
+                        else:
+                            self.connection.execute(
+                                """
+                                UPDATE stress_samples
+                                SET
+                                    event_date=?,
+                                    timestamp_ms=?,
+                                    stress=?,
+                                    category=?,
+                                    source_json=?,
+                                    updated_at=?
+                                WHERE record_key=?
+                                """,
+                                (*sample_values, now, sample_key),
+                            )
+                            stats["samples_updated"] += 1
+
+        return stats
+
+    def fetch_stress_daily(
+        self,
+        from_date: str,
+        to_date: str,
+    ) -> list[dict[str, Any]]:
+        """Return canonical Stress daily facts, newest day first."""
+        rows = self.connection.execute(
+            """
+            SELECT
+                event_date AS date,
+                min_stress,
+                max_stress,
+                avg_stress,
+                relax_proportion,
+                normal_proportion,
+                medium_proportion,
+                high_proportion,
+                sample_count
+            FROM stress_daily_records
+            WHERE event_date BETWEEN ? AND ?
+            ORDER BY event_date DESC
+            """,
+            (from_date, to_date),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def fetch_latest_stress_daily(self) -> dict[str, Any] | None:
+        """Return the newest canonical Stress daily fact."""
+        row = self.connection.execute(
+            """
+            SELECT
+                event_date AS date,
+                min_stress,
+                max_stress,
+                avg_stress,
+                relax_proportion,
+                normal_proportion,
+                medium_proportion,
+                high_proportion,
+                sample_count
+            FROM stress_daily_records
+            ORDER BY event_date DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def fetch_stress_samples(
+        self,
+        from_date: str,
+        to_date: str,
+    ) -> list[dict[str, Any]]:
+        """Return only stored native Stress samples, in timestamp order."""
+        rows = self.connection.execute(
+            """
+            SELECT
+                event_date AS date,
+                timestamp_ms,
+                stress AS value,
+                category
+            FROM stress_samples
+            WHERE event_date BETWEEN ? AND ?
+            ORDER BY timestamp_ms
+            """,
+            (from_date, to_date),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -1334,6 +1721,7 @@ class Database:
     def status(self) -> dict[str, Any]:
         tables = (
             "hrv_samples", "hrv_daily", "wake_energy", "exertion_records",
+            "stress_daily_records", "stress_samples",
             "readiness_records", "sleep_related_readiness", "charge_records",
             "insight_records", "lifeload_records", "phn_daily_records", "phn_training_plans", "raw_payloads", "sync_runs",
         )
@@ -1418,6 +1806,13 @@ class Database:
                 "supported": True,
                 "latest_date": latest_date,
                 "coverage": coverage,
+                "freshness": (
+                    "current"
+                    if latest_date == today
+                    else "missing"
+                    if latest_date is None
+                    else "stale"
+                ),
             }
 
         recovery = [domains[name] for name in MORNING_RECOVERY_DOMAINS]
@@ -1631,6 +2026,8 @@ def inspect_database_file(path: str | Path) -> dict[str, Any]:
         schema_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
         tables = [
             "hrv_samples", "hrv_daily", "wake_energy", "exertion_records",
+            "stress_daily_records",
+            "stress_samples",
             "readiness_records", "sleep_related_readiness", "charge_records",
             "insight_records", "lifeload_records", "phn_daily_records", "phn_training_plans", "raw_payloads", "sync_runs",
             "sync_run_domains",

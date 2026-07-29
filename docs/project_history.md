@@ -619,3 +619,25 @@ The exact Resting source/algorithm remains unresolved.
 A new `WatchSportStatistics / SPORT_LOAD` contract was also discovered and is
 reserved as the next dedicated training-load batch.
 
+
+## I001 — Native Stress implementation
+
+Implemented the production-validated `all_day_stress/all_day_stress` factual
+contract through I001.1–I001.5.
+
+The completed path is:
+
+Zepp cloud readback → canonical integer normalization → SQLite schema v7
+daily/sparse-sample persistence → dedicated incremental sync → SQLite-only
+factual CLI.
+
+`stress --days N` returns native daily min/max/avg, native category
+proportions, and sample counts. `--samples` explicitly adds only stored native
+epoch-millisecond measurements. Missing five-minute measurements remain
+missing.
+
+Stress freshness reuses the database factual-freshness system and the
+`Europe/Ljubljana` calendar. The latest daily factual `event_date` maps to
+`current`, `stale`, or `missing`; sparse sample recency is not used.
+
+I001.5 was validated offline with unit tests and temporary SQLite CLI runs.

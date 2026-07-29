@@ -333,7 +333,7 @@ Never infer local-day semantics from UTC bucket boundaries.
 
 ## Stress — factual contract solved
 
-Status: FACTUAL CONTRACT SOLVED / IMPLEMENTATION-READY
+Status: IMPLEMENTED / LIVE-VALIDATED THROUGH INCREMENTAL SYNC
 
 Do NOT restart broad Stress reverse engineering.
 
@@ -425,18 +425,19 @@ Do NOT decode stressInfo for ordinary TRC/coach Stress support unless a future
 requirement proves it contains a needed metric unavailable from
 `all_day_stress`.
 
-### Current implementation gap
+### Current implementation
 
-The factual contract is solved, but current `zepp-health-cli` still needs:
+I001.1–I001.5 are implemented:
 
-- cloud read-path validation for `all_day_stress`
-- first-class normalization
-- SQLite persistence
-- incremental sync
-- CLI factual output
-- tests/freshness
+- production readback through `all_day_stress/all_day_stress`
+- canonical integer normalization
+- SQLite schema v7 daily and sparse-sample persistence
+- dedicated incremental synchronization
+- SQLite-only factual `stress` CLI output
+- local-date factual freshness (`current`, `stale`, `missing`)
 
-This is implementation work, not further semantic reverse engineering.
+Native daily aggregates remain authoritative. The CLI never fills missing
+five-minute intervals and does not expose stored raw payload text.
 
 
 ## Food / Nutrition — production-validated core contract
@@ -711,4 +712,3 @@ with:
 `TSB = CTL - ATL`
 
 SPORT_LOAD should be investigated and implemented as a separate next batch.
-

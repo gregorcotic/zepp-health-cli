@@ -24,6 +24,8 @@ python3 zepp_health.py sync-db --days 30
 python3 zepp_health.py sync-db --days 30 --db /opt/zepp-health-cli/data/zepp_health.db --json
 python3 zepp_health.py db-status
 python3 zepp_health.py daily-status --days 14 --from-db
+python3 zepp_health.py stress --days 7 --db data/zepp_health.db
+python3 zepp_health.py stress --days 1 --samples --db data/zepp_health.db --json
 python3 zepp_health.py sync-activities --days 7 --db data/zepp_health.db
 python3 zepp_health.py activity-status --db data/zepp_health.db
 ```
@@ -45,6 +47,10 @@ normalized records and raw payload insertion use a SQLite transaction.
 - `insight_records`: normalized `Charge/insight_data` samples and unknown codes.
 - `raw_payloads`: deduplicated sanitized JSON responses for future reverse engineering.
 - `sync_runs` and `sync_run_domains`: synchronization provenance and outcomes.
+- `stress_daily_records`: one factual native Stress aggregate per local
+  `event_date`, including native min/max/avg, category proportions, and count.
+- `stress_samples`: only native sparse Stress timeline measurements, keyed by
+  their epoch-millisecond timestamp; missing intervals are not synthesized.
 - `activities` and `activity_summary_metrics`: canonical native activity
   identity/time and factual metric envelopes.
 - `activity_streams` and `activity_samples`: independently sampled native GPS,
@@ -74,7 +80,7 @@ sidecar files.
 
 ## Migrations and deployment
 
-The current database schema version is 6. Future compatible schema
+The current database schema version is 7. Future compatible schema
 changes must increment the migration version and apply transactional migrations
 before normal reads/writes. The database is runtime state, not source code:
 
@@ -86,6 +92,18 @@ python3 zepp_health.py db-status --db /opt/zepp-health-cli/data/zepp_health.db
 ```
 
 `git pull` does not overwrite ignored local database files.
+
+## Stress persistence and reads
+
+Schema v7 stores native `all_day_stress` facts in `stress_daily_records` and
+`stress_samples`. `avg_stress` is the native Zepp aggregate and is not
+recomputed from samples. Numeric aggregate fields are normalized to integers
+before persistence so JSON strings such as `"31"` compare idempotently.
+
+The `stress` command reads SQLite only. Its requested daily window is based on
+the `Europe/Ljubljana` local calendar. Freshness is based on the newest factual
+daily `event_date`: today is `current`, an earlier date is `stale`, and no
+daily row is `missing`. Sparse sample recency does not determine freshness.
 
 Activity tables are an additive v3-to-v4 migration. They share backup and
 integrity tooling with health data, but activity freshness is reported by
@@ -261,4 +279,3 @@ mealType semantic dictionary:
 6 Evening Snack
 
 Food Goals should be stored separately from individual Food Log records.
-

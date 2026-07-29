@@ -4277,6 +4277,187 @@ READINESS_FIELDS = (
 )
 
 
+
+def _int_or_none(value):
+    """Return a canonical integer for Zepp numeric fields, or None."""
+    if value is None or value == "":
+        return None
+
+    if isinstance(value, bool):
+        return None
+
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def normalize_stress_data(payload):
+    """Normalize native Zepp ``all_day_stress`` events.
+
+    Returns one factual daily record per event. The native daily aggregates
+    remain authoritative. The 5-minute timeline is preserved as a sparse
+    sample list; missing intervals are not synthesized.
+
+    Supports both known readback shapes:
+    - /users/{id}/events flattened records
+    - /v2/users/me/events records with a nested ``value`` object
+    """
+    normalized = []
+
+    if payload is None:
+        return normalized
+
+    # Reuse the project's generic event extraction when available.
+    try:
+        records = _event_records(payload)
+    except NameError:
+        if isinstance(payload, list):
+            records = payload
+        elif isinstance(payload, dict):
+            records = (
+                payload.get("items")
+                or payload.get("data")
+                or payload.get("events")
+                or []
+            )
+            if isinstance(records, dict):
+                records = [records]
+        else:
+            records = []
+
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+
+        try:
+            value = _record_payload(record)
+        except NameError:
+            value = record.get("value") or record
+
+        if not isinstance(value, dict):
+            continue
+
+        event_type = (
+            record.get("eventType")
+            or record.get("type")
+            or value.get("eventType")
+        )
+
+        # Generic /users event output may already be type-filtered and omit
+        # eventType. Reject only an explicit non-Stress type.
+        if event_type not in (None, "all_day_stress"):
+            continue
+
+        raw_samples = value.get("data")
+
+        # Some event paths preserve data as a JSON string.
+        if isinstance(raw_samples, str):
+            try:
+                import json as _json
+                raw_samples = _json.loads(raw_samples)
+            except Exception:
+                raw_samples = []
+
+        if not isinstance(raw_samples, list):
+            raw_samples = []
+
+        samples = []
+
+        for sample in raw_samples:
+            if not isinstance(sample, dict):
+                continue
+
+            timestamp_ms = sample.get("time")
+            stress = sample.get("value")
+
+            if not isinstance(timestamp_ms, (int, float)):
+                continue
+
+            if not isinstance(stress, (int, float)):
+                continue
+
+            # Stress is a native 0..100 score. Do not invent or interpolate
+            # missing five-minute intervals.
+            if stress < 0 or stress > 100:
+                continue
+
+            if stress <= 39:
+                category = "relaxed"
+            elif stress <= 59:
+                category = "normal"
+            elif stress <= 79:
+                category = "medium"
+            else:
+                category = "high"
+
+            samples.append(
+                {
+                    "timestamp_ms": int(timestamp_ms),
+                    "stress": int(stress),
+                    "category": category,
+                }
+            )
+
+        event_timestamp_ms = _record_timestamp(record, value)
+        event_date = _record_date(record, value)
+
+        provenance = _provenance(
+            "all_day_stress",
+            "all_day_stress",
+            "confirmed",
+        )
+
+        # Preserve common device provenance even if the generic helper does
+        # not currently include these keys.
+        if not isinstance(provenance, dict):
+            provenance = {}
+
+        for key in (
+            "deviceId",
+            "deviceSn",
+            "deviceSource",
+            "deviceMac",
+        ):
+            if key in record and key not in provenance:
+                provenance[key] = record.get(key)
+            elif key in value and key not in provenance:
+                provenance[key] = value.get(key)
+
+        normalized.append(
+            {
+                "event_type": "all_day_stress",
+                "event_timestamp_ms": (
+                    int(event_timestamp_ms)
+                    if isinstance(event_timestamp_ms, (int, float))
+                    else None
+                ),
+                "date": event_date,
+                "min_stress": _int_or_none(value.get("minStress")),
+                "max_stress": _int_or_none(value.get("maxStress")),
+                "avg_stress": _int_or_none(value.get("avgStress")),
+                "relax_proportion": _int_or_none(
+                    value.get("relaxProportion")
+                ),
+                "normal_proportion": _int_or_none(
+                    value.get("normalProportion")
+                ),
+                "medium_proportion": _int_or_none(
+                    value.get("mediumProportion")
+                ),
+                "high_proportion": _int_or_none(
+                    value.get("highProportion")
+                ),
+                "samples": samples,
+                "sample_count": len(samples),
+                "provenance": provenance,
+                "raw": record,
+            }
+        )
+
+    return normalized
+
+
 def normalize_wake_data(data: Any) -> list[dict[str, Any]]:
     """Normalize Charge/wake_data samples, which are nested under value.samples."""
     return _normalize_sample_records(
@@ -5474,6 +5655,62 @@ def sync_native_metrics(
                 )
             domains.append(result)
             database.record_sync_domain(run_id, result)
+        # all_day_stress is persisted separately because one native event
+        # contains both an authoritative daily summary and a sparse
+        # five-minute timeline.
+        domain = "stress"
+        event_type = "all_day_stress"
+        sub_type = "all_day_stress"
+
+        try:
+            payload = client.events(
+                event_type,
+                sub_type,
+                from_ms,
+                to_ms,
+                limit=limit,
+                reverse=True,
+            )
+
+            rows = normalize_stress_data(payload)
+            counts = database.store_stress_rows(rows)
+
+            result = _sync_summary_result(
+                domain,
+                event_type,
+                sub_type,
+                status="ok" if rows else "empty",
+                records_retrieved=len(rows),
+                inserted=(
+                    counts["daily_inserted"]
+                    + counts["samples_inserted"]
+                ),
+                updated=(
+                    counts["daily_updated"]
+                    + counts["samples_updated"]
+                ),
+                unchanged=(
+                    counts["daily_unchanged"]
+                    + counts["samples_unchanged"]
+                ),
+            )
+
+            # Keep the detailed Stress persistence counts available in the
+            # sync summary without changing the generic sync-domain contract.
+            result.update(counts)
+
+        except Exception as exc:
+            result = _sync_summary_result(
+                domain,
+                event_type,
+                sub_type,
+                status="error",
+                error=type(exc).__name__,
+            )
+
+        domains.append(result)
+        database.record_sync_domain(run_id, result)
+
         error_count = sum(row["status"] == "error" for row in domains)
         status = "error" if error_count == len(domains) else "partial" if error_count else "ok"
         summary = {
@@ -5616,6 +5853,109 @@ def probe_historical_domains(client: ZeppClient, days_list: list[int], *, limit:
 
 def _db_path_from_args(args: argparse.Namespace) -> Path:
     return resolve_db_path(getattr(args, "db_path", None), load_config())
+
+
+def _stress_daily_json(row: dict[str, Any]) -> dict[str, Any]:
+    """Shape stored Stress facts without exposing raw payload/provenance."""
+    return {
+        "date": row["date"],
+        "min_stress": row["min_stress"],
+        "max_stress": row["max_stress"],
+        "avg_stress": row["avg_stress"],
+        "distribution": {
+            "relaxed": row["relax_proportion"],
+            "normal": row["normal_proportion"],
+            "medium": row["medium_proportion"],
+            "high": row["high_proportion"],
+        },
+        "sample_count": row["sample_count"],
+    }
+
+
+def read_stress_report(
+    database: Database,
+    days: int,
+    *,
+    include_samples: bool = False,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Build a factual Stress report exclusively from SQLite."""
+    if days < 1:
+        raise ValueError("days must be at least 1")
+    instant = now or datetime.now(timezone.utc)
+    local_today = instant.astimezone(ZoneInfo(FRESHNESS_TIMEZONE)).date()
+    from_date = (local_today - timedelta(days=days - 1)).isoformat()
+    to_date = local_today.isoformat()
+    daily_rows = database.fetch_stress_daily(from_date, to_date)
+    latest_row = database.fetch_latest_stress_daily()
+    freshness = database.factual_freshness(
+        instant,
+        FRESHNESS_TIMEZONE,
+    )["domain_data_freshness"]["stress"]
+
+    result = {
+        "timezone": FRESHNESS_TIMEZONE,
+        "from_date": from_date,
+        "to_date": to_date,
+        "freshness": freshness["freshness"],
+        "latest": _stress_daily_json(latest_row) if latest_row else None,
+        "days": [_stress_daily_json(row) for row in daily_rows],
+    }
+    if include_samples:
+        result["samples"] = database.fetch_stress_samples(
+            from_date,
+            to_date,
+        )
+    return result
+
+
+def cmd_stress(args: argparse.Namespace) -> None:
+    database = Database(_db_path_from_args(args))
+    try:
+        result = read_stress_report(
+            database,
+            args.days,
+            include_samples=args.samples,
+        )
+    finally:
+        database.close()
+
+    if args.json:
+        _emit_json(result, args)
+        return
+
+    latest = result["latest"]
+    print("Stress — latest")
+    if latest is None:
+        print("No stored Stress daily data.")
+        print("Freshness: missing")
+        return
+    distribution = latest["distribution"]
+    print(f"Date: {latest['date']}")
+    print(f"Average: {latest['avg_stress']}")
+    print(
+        f"Min / Max: {latest['min_stress']} / "
+        f"{latest['max_stress']}"
+    )
+    print(
+        "Distribution: "
+        f"Relaxed {distribution['relaxed']}%, "
+        f"Normal {distribution['normal']}%, "
+        f"Medium {distribution['medium']}%, "
+        f"High {distribution['high']}%"
+    )
+    print(f"Samples: {latest['sample_count']}")
+    print(f"Freshness: {result['freshness']}")
+    if result["days"]:
+        print("Daily history:")
+        for row in result["days"]:
+            print(
+                f"  {row['date']}: avg {row['avg_stress']}, "
+                f"min/max {row['min_stress']}/{row['max_stress']}, "
+                f"samples {row['sample_count']}"
+            )
+    if args.samples:
+        print(f"Stored samples in window: {len(result['samples'])}")
 
 
 def cmd_sync_db(args: argparse.Namespace) -> None:
@@ -6314,6 +6654,20 @@ def main() -> None:
     sp.add_argument("--from-db", action="store_true", help="Read stored data without contacting Zepp")
     sp.add_argument("--limit", type=int, default=2000)
     sp.set_defaults(func=cmd_daily_status)
+
+    sp = sub.add_parser(
+        "stress",
+        help="Factual Stress daily data from SQLite",
+    )
+    _add_days(sp)
+    _add_json(sp)
+    _add_db(sp)
+    sp.add_argument(
+        "--samples",
+        action="store_true",
+        help="Include stored native sparse Stress samples",
+    )
+    sp.set_defaults(func=cmd_stress)
 
     sp = sub.add_parser("sync-db", help="Fetch native Zepp metrics into SQLite")
     _add_days(sp)

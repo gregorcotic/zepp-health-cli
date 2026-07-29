@@ -7,6 +7,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 import configparser
 import subprocess
 import sys
@@ -82,7 +83,10 @@ def fixture_responses():
             "samples": [{"insightId": 1, "insight": 66, "type": 2, "diff": -4, "slope": -0.1, "s": 1000, "e": 2000, "trackId": 3, "thres": 0, "u": 255, "jsonExtra": '{"x":1}'}],
         }]},
         ("LifeLoad", "summary"): {"items": []},
-    }
+        ("all_day_stress", "all_day_stress"): {
+        "items": []
+    },
+}
 
 
 class DatabaseTests(unittest.TestCase):
@@ -781,6 +785,488 @@ class DatabaseTests(unittest.TestCase):
         wrapper_text = Path("scripts/zepp-health-sync").read_text()
         self.assertIn("zepp-health-sync skipped: lock held", wrapper_text)
         self.assertIn("exit 75", wrapper_text)
+
+
+
+    def test_stress_persistence_v7(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+
+        db = Database(Path(directory.name) / "zepp.db")
+        self.addCleanup(db.close)
+
+        schema_version = db.connection.execute(
+            "PRAGMA user_version"
+        ).fetchone()[0]
+
+        self.assertEqual(schema_version, 7)
+
+        rows = [
+            {
+                "event_type": "all_day_stress",
+                "event_timestamp_ms": 1779926400001,
+                "date": "2026-05-28",
+                "min_stress": 10,
+                "max_stress": 55,
+                "avg_stress": 34,
+                "relax_proportion": 54,
+                "normal_proportion": 46,
+                "medium_proportion": 0,
+                "high_proportion": 0,
+                "sample_count": 3,
+                "provenance": {
+                    "eventType": "all_day_stress",
+                    "subType": "all_day_stress",
+                },
+                "samples": [
+                    {
+                        "timestamp_ms": 1779919500000,
+                        "stress": 43,
+                        "category": "normal",
+                    },
+                    {
+                        "timestamp_ms": 1779919800000,
+                        "stress": 49,
+                        "category": "normal",
+                    },
+
+                    # Deliberate 10-minute jump.
+                    {
+                        "timestamp_ms": 1779920400000,
+                        "stress": 22,
+                        "category": "relaxed",
+                    },
+                ],
+                "raw": {
+                    "eventType": "all_day_stress",
+                    "timestamp": 1779926400001,
+                },
+            }
+        ]
+
+        first = db.store_stress_rows(rows)
+
+        self.assertEqual(first["daily_inserted"], 1)
+        self.assertEqual(first["daily_updated"], 0)
+        self.assertEqual(first["daily_unchanged"], 0)
+
+        self.assertEqual(first["samples_inserted"], 3)
+        self.assertEqual(first["samples_updated"], 0)
+        self.assertEqual(first["samples_unchanged"], 0)
+
+        daily_count = db.connection.execute(
+            "SELECT COUNT(*) FROM stress_daily_records"
+        ).fetchone()[0]
+
+        sample_count = db.connection.execute(
+            "SELECT COUNT(*) FROM stress_samples"
+        ).fetchone()[0]
+
+        self.assertEqual(daily_count, 1)
+        self.assertEqual(sample_count, 3)
+
+        # Writing the exact same normalized/native state is unchanged.
+        second = db.store_stress_rows(rows)
+
+        self.assertEqual(second["daily_unchanged"], 1)
+        self.assertEqual(second["samples_unchanged"], 3)
+
+        self.assertEqual(
+            db.connection.execute(
+                "SELECT COUNT(*) FROM stress_daily_records"
+            ).fetchone()[0],
+            1,
+        )
+
+        self.assertEqual(
+            db.connection.execute(
+                "SELECT COUNT(*) FROM stress_samples"
+            ).fetchone()[0],
+            3,
+        )
+
+        # Later native daily snapshot updates the same logical day.
+        rows[0]["avg_stress"] = 35
+        rows[0]["normal_proportion"] = 47
+
+        # Also correct one native sample in place.
+        rows[0]["samples"][1]["stress"] = 50
+
+        third = db.store_stress_rows(rows)
+
+        self.assertEqual(third["daily_updated"], 1)
+        self.assertEqual(third["samples_updated"], 1)
+        self.assertEqual(third["samples_unchanged"], 2)
+
+        daily = db.connection.execute(
+            """
+            SELECT avg_stress, normal_proportion
+            FROM stress_daily_records
+            WHERE event_date='2026-05-28'
+            """
+        ).fetchone()
+
+        self.assertEqual(daily["avg_stress"], 35)
+        self.assertEqual(daily["normal_proportion"], 47)
+
+        sample = db.connection.execute(
+            """
+            SELECT stress, category
+            FROM stress_samples
+            WHERE timestamp_ms=1779919800000
+            """
+        ).fetchone()
+
+        self.assertEqual(sample["stress"], 50)
+        self.assertEqual(sample["category"], "normal")
+
+        # Sparse timeline must remain sparse:
+        # no synthetic 5-minute sample is inserted at 1779920100000.
+        missing = db.connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM stress_samples
+            WHERE timestamp_ms=1779920100000
+            """
+        ).fetchone()[0]
+
+        self.assertEqual(missing, 0)
+
+
+
+    def test_sync_native_metrics_stress(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            db = Database(Path(directory) / "stress-sync.db")
+
+            responses = fixture_responses()
+
+            responses[
+                ("all_day_stress", "all_day_stress")
+            ] = {
+                "items": [
+                    {
+                        "eventType": "all_day_stress",
+                        "timestamp": 1779926400001,
+                        "deviceId": "stress-device",
+                        "value": {
+                            "minStress": 10,
+                            "maxStress": 55,
+                            "avgStress": 34,
+                            "relaxProportion": 54,
+                            "normalProportion": 46,
+                            "mediumProportion": 0,
+                            "highProportion": 0,
+                            "data": [
+                                {
+                                    "time": 1779919500000,
+                                    "value": 43,
+                                },
+                                {
+                                    "time": 1779919800000,
+                                    "value": 49,
+                                },
+
+                                # Native 10-minute gap.
+                                {
+                                    "time": 1779920400000,
+                                    "value": 22,
+                                },
+                            ],
+                        },
+                    }
+                ]
+            }
+
+            result = sync_native_metrics(
+                FakeClient(responses),
+                db,
+                7,
+            )
+
+            stress = [
+                item
+                for item in result["domains"]
+                if item["domain"] == "stress"
+            ]
+
+            self.assertEqual(len(stress), 1)
+
+            stress = stress[0]
+
+            self.assertEqual(stress["status"], "ok")
+            self.assertEqual(
+                stress["event_type"],
+                "all_day_stress",
+            )
+            self.assertEqual(
+                stress["sub_type"],
+                "all_day_stress",
+            )
+            self.assertEqual(
+                stress["records_retrieved"],
+                1,
+            )
+
+            self.assertEqual(
+                stress["daily_inserted"],
+                1,
+            )
+            self.assertEqual(
+                stress["samples_inserted"],
+                3,
+            )
+
+            daily = db.connection.execute(
+                """
+                SELECT
+                    min_stress,
+                    max_stress,
+                    avg_stress,
+                    sample_count
+                FROM stress_daily_records
+                WHERE event_date='2026-05-28'
+                """
+            ).fetchone()
+
+            self.assertIsNotNone(daily)
+            self.assertEqual(daily["min_stress"], 10)
+            self.assertEqual(daily["max_stress"], 55)
+            self.assertEqual(daily["avg_stress"], 34)
+            self.assertEqual(daily["sample_count"], 3)
+
+            samples = db.connection.execute(
+                """
+                SELECT timestamp_ms, stress
+                FROM stress_samples
+                ORDER BY timestamp_ms
+                """
+            ).fetchall()
+
+            self.assertEqual(len(samples), 3)
+
+            # Sparse timeline remains sparse.
+            synthetic = db.connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM stress_samples
+                WHERE timestamp_ms=1779920100000
+                """
+            ).fetchone()[0]
+
+            self.assertEqual(synthetic, 0)
+
+            sync_domain = db.connection.execute(
+                """
+                SELECT domain, status
+                FROM sync_run_domains
+                WHERE domain='stress'
+                ORDER BY rowid DESC
+                LIMIT 1
+                """
+            ).fetchone()
+
+            self.assertIsNotNone(sync_domain)
+            self.assertEqual(
+                sync_domain["domain"],
+                "stress",
+            )
+            self.assertEqual(
+                sync_domain["status"],
+                "ok",
+            )
+
+            db.close()
+
+    def test_stress_database_reads_preserve_sparse_samples(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            db = Database(Path(directory) / "stress-read.db")
+            rows = []
+            for day, timestamp, average in (
+                ("2026-07-27", 1785110400000, 28),
+                ("2026-07-28", 1785196800000, 34),
+            ):
+                rows.append({
+                    "event_timestamp_ms": timestamp,
+                    "date": day,
+                    "min_stress": 10,
+                    "max_stress": 55,
+                    "avg_stress": average,
+                    "relax_proportion": 54,
+                    "normal_proportion": 46,
+                    "medium_proportion": 0,
+                    "high_proportion": 0,
+                    "sample_count": 2,
+                    "samples": [
+                        {
+                            "timestamp_ms": timestamp + 300000,
+                            "stress": 22,
+                            "category": "relaxed",
+                        },
+                        {
+                            # Deliberate missing five-minute measurement.
+                            "timestamp_ms": timestamp + 900000,
+                            "stress": 43,
+                            "category": "normal",
+                        },
+                    ],
+                    "raw": {"eventType": "all_day_stress"},
+                })
+            db.store_stress_rows(rows)
+
+            daily = db.fetch_stress_daily(
+                "2026-07-27",
+                "2026-07-28",
+            )
+            self.assertEqual(
+                [row["date"] for row in daily],
+                ["2026-07-28", "2026-07-27"],
+            )
+            self.assertEqual(
+                [row["avg_stress"] for row in daily],
+                [34, 28],
+            )
+            self.assertEqual(
+                db.fetch_latest_stress_daily()["date"],
+                "2026-07-28",
+            )
+
+            samples = db.fetch_stress_samples(
+                "2026-07-28",
+                "2026-07-28",
+            )
+            self.assertEqual(len(samples), 2)
+            self.assertEqual(
+                [row["timestamp_ms"] for row in samples],
+                [1785197100000, 1785197700000],
+            )
+            self.assertEqual(
+                [row["value"] for row in samples],
+                [22, 43],
+            )
+            db.close()
+
+    def test_stress_freshness_current_stale_and_missing(self) -> None:
+        now = datetime(2026, 7, 29, 8, 0, tzinfo=timezone.utc)
+
+        with tempfile.TemporaryDirectory() as directory:
+            db = Database(Path(directory) / "current.db")
+            db.store_stress_rows([{
+                "date": "2026-07-29",
+                "sample_count": 0,
+                "samples": [],
+                "raw": {},
+            }])
+            state = db.factual_freshness(now)[
+                "domain_data_freshness"
+            ]["stress"]
+            self.assertEqual(state["freshness"], "current")
+            db.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            db = Database(Path(directory) / "stale.db")
+            db.store_stress_rows([{
+                "date": "2026-07-28",
+                "sample_count": 0,
+                "samples": [],
+                "raw": {},
+            }])
+            state = db.factual_freshness(now)[
+                "domain_data_freshness"
+            ]["stress"]
+            self.assertEqual(state["freshness"], "stale")
+            db.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            db = Database(Path(directory) / "missing.db")
+            state = db.factual_freshness(now)[
+                "domain_data_freshness"
+            ]["stress"]
+            self.assertEqual(state["freshness"], "missing")
+            db.close()
+
+    def test_stress_cli_json_shape_and_optional_sparse_samples(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "stress-cli.db"
+            today = datetime.now(
+                ZoneInfo("Europe/Ljubljana")
+            ).date().isoformat()
+            timestamp = int(
+                datetime.now(timezone.utc).timestamp() * 1000
+            )
+            db = Database(path)
+            db.store_stress_rows([{
+                "event_timestamp_ms": timestamp,
+                "date": today,
+                "min_stress": 10,
+                "max_stress": 81,
+                "avg_stress": 34,
+                "relax_proportion": 54,
+                "normal_proportion": 45,
+                "medium_proportion": 0,
+                "high_proportion": 1,
+                "sample_count": 2,
+                "samples": [
+                    {
+                        "timestamp_ms": timestamp - 900000,
+                        "stress": 22,
+                        "category": "relaxed",
+                    },
+                    {
+                        "timestamp_ms": timestamp - 300000,
+                        "stress": 81,
+                        "category": "high",
+                    },
+                ],
+                "raw": {"private": "not exposed"},
+            }])
+            db.close()
+
+            base = [
+                sys.executable,
+                "zepp_health.py",
+                "stress",
+                "--days",
+                "1",
+                "--db",
+                str(path),
+                "--json",
+            ]
+            without_samples = subprocess.run(
+                base,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            result = json.loads(without_samples.stdout)
+            self.assertEqual(result["latest"]["date"], today)
+            self.assertEqual(
+                result["latest"]["distribution"],
+                {
+                    "relaxed": 54,
+                    "normal": 45,
+                    "medium": 0,
+                    "high": 1,
+                },
+            )
+            self.assertNotIn("samples", result)
+            self.assertNotIn("private", without_samples.stdout)
+
+            with_samples = subprocess.run(
+                base[:-1] + ["--samples", "--json"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            result = json.loads(with_samples.stdout)
+            self.assertEqual(len(result["samples"]), 2)
+            self.assertEqual(
+                [row["timestamp_ms"] for row in result["samples"]],
+                [timestamp - 900000, timestamp - 300000],
+            )
+            self.assertEqual(
+                [row["value"] for row in result["samples"]],
+                [22, 81],
+            )
 
 
 if __name__ == "__main__":

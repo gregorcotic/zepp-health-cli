@@ -18,7 +18,8 @@ from zepp_health import (
     normalize_phn_training_plan_data,
     normalize_wake_data,
     _normalize_value_records,
-)
+
+    normalize_stress_data,)
 
 
 class NativeMetricsTests(unittest.TestCase):
@@ -471,6 +472,103 @@ class NativeMetricsTests(unittest.TestCase):
         self.assertEqual(
             rows[0]["timestamp"],
             plan_id,
+        )
+
+
+    def test_normalize_all_day_stress(self) -> None:
+        payload = {
+            "items": [
+                {
+                    "eventType": "all_day_stress",
+                    "timestamp": 1779926400001,
+                    "deviceId": "stress-device",
+                    "value": {
+                        "minStress": 10,
+                        "maxStress": 55,
+                        "avgStress": 34,
+                        "relaxProportion": 54,
+                        "normalProportion": 46,
+                        "mediumProportion": 0,
+                        "highProportion": 0,
+                        "data": [
+                            {"time": 1779919500000, "value": 43},
+                            {"time": 1779919800000, "value": 49},
+
+                            # Intentional missing 5-minute interval.
+                            {"time": 1779920400000, "value": 22},
+                            {"time": 1779920700000, "value": 81},
+                        ],
+                    },
+                }
+            ]
+        }
+
+        rows = normalize_stress_data(payload)
+
+        self.assertEqual(len(rows), 1)
+
+        row = rows[0]
+
+        self.assertEqual(row["event_type"], "all_day_stress")
+        self.assertEqual(row["date"], "2026-05-28")
+
+        # Native daily aggregates remain authoritative.
+        self.assertEqual(row["min_stress"], 10)
+        self.assertEqual(row["max_stress"], 55)
+        self.assertEqual(row["avg_stress"], 34)
+
+        self.assertEqual(row["relax_proportion"], 54)
+        self.assertEqual(row["normal_proportion"], 46)
+        self.assertEqual(row["medium_proportion"], 0)
+        self.assertEqual(row["high_proportion"], 0)
+
+        self.assertEqual(row["sample_count"], 4)
+
+        self.assertEqual(
+            row["samples"],
+            [
+                {
+                    "timestamp_ms": 1779919500000,
+                    "stress": 43,
+                    "category": "normal",
+                },
+                {
+                    "timestamp_ms": 1779919800000,
+                    "stress": 49,
+                    "category": "normal",
+                },
+                {
+                    "timestamp_ms": 1779920400000,
+                    "stress": 22,
+                    "category": "relaxed",
+                },
+                {
+                    "timestamp_ms": 1779920700000,
+                    "stress": 81,
+                    "category": "high",
+                },
+            ],
+        )
+
+        # Sparse timeline stays sparse:
+        # a missing five-minute bucket must not become stress=0.
+        self.assertEqual(
+            row["samples"][2]["timestamp_ms"]
+            - row["samples"][1]["timestamp_ms"],
+            600000,
+        )
+
+        self.assertEqual(
+            row["provenance"]["eventType"],
+            "all_day_stress",
+        )
+        self.assertEqual(
+            row["provenance"]["subType"],
+            "all_day_stress",
+        )
+        self.assertEqual(
+            row["provenance"]["deviceId"],
+            "stress-device",
         )
 
 
