@@ -4292,6 +4292,106 @@ def _int_or_none(value):
         return None
 
 
+FOOD_MEAL_TYPES = {
+    1: "Breakfast",
+    2: "Morning Snack",
+    3: "Lunch",
+    4: "Afternoon Snack",
+    5: "Dinner",
+    6: "Evening Snack",
+}
+
+
+def _food_number(value: Any) -> int | float | None:
+    """Canonicalize a native Food number without inventing zero."""
+    if value in (None, "") or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return int(number) if number.is_integer() else number
+
+
+def food_meal_label(meal_type: Any) -> str | None:
+    """Return an audited label while keeping unknown values representable."""
+    canonical = _food_number(meal_type)
+    if isinstance(canonical, int):
+        return FOOD_MEAL_TYPES.get(canonical, f"Unknown ({canonical})")
+    if meal_type not in (None, ""):
+        return f"Unknown ({meal_type})"
+    return None
+
+
+def _food_code(value: Any) -> Any:
+    number = _food_number(value)
+    return number if number is not None else value
+
+
+def normalize_food_data(payload: Any) -> list[dict[str, Any]]:
+    """Normalize production-validated native Food/real_data entries."""
+    normalized: list[dict[str, Any]] = []
+    for record in _event_records(payload):
+        if not isinstance(record, dict):
+            continue
+        value = record.get("value")
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except (TypeError, json.JSONDecodeError):
+                value = {}
+        source = dict(value) if isinstance(value, dict) else {}
+        source.update({key: item for key, item in record.items() if key != "value"})
+        event_type = source.get("eventType")
+        sub_type = source.get("subType")
+        if event_type not in (None, "Food"):
+            continue
+        if sub_type not in (None, "real_data"):
+            continue
+
+        food_log_id = source.get("foodLogId")
+        if food_log_id in (None, ""):
+            continue
+        meal_type_raw = source.get("mealType")
+        meal_type_number = _food_number(meal_type_raw)
+        meal_type = (
+            meal_type_number
+            if meal_type_number is not None
+            else meal_type_raw
+        )
+        timestamp = _record_timestamp(record, source)
+        normalized.append({
+            "food_log_id": str(food_log_id),
+            "date": _record_date(record, source),
+            "timestamp_ms": (
+                int(timestamp)
+                if isinstance(timestamp, (int, float))
+                else None
+            ),
+            "meal_type": meal_type,
+            "meal_label": food_meal_label(meal_type),
+            "meal_name": source.get("mealName"),
+            "food_name": source.get("foodName"),
+            "measure_weight": _food_number(source.get("measureWeight")),
+            "weight_unit": source.get("weightUnit"),
+            "energy": _food_number(source.get("energy")),
+            "carbohydrates": _food_number(source.get("carbohydrates")),
+            "protein": _food_number(source.get("protein")),
+            "fat_total": _food_number(source.get("fatTotal")),
+            "fiber": _food_number(source.get("fiber")),
+            "servings": _food_number(source.get("servings")),
+            "labels": source.get("labels"),
+            "emoji": source.get("emoji"),
+            "recognize_type": _food_code(source.get("recognizeType")),
+            "recognize_source_type": _food_code(
+                source.get("recognizeSourceType")
+            ),
+            "provenance": _provenance("Food", "real_data", "confirmed"),
+            "raw": record,
+        })
+    return normalized
+
+
 def normalize_stress_data(payload):
     """Normalize native Zepp ``all_day_stress`` events.
 
@@ -5711,6 +5811,39 @@ def sync_native_metrics(
         domains.append(result)
         database.record_sync_domain(run_id, result)
 
+        domain = "food"
+        event_type = "Food"
+        sub_type = "real_data"
+        try:
+            payload = client.events(
+                event_type,
+                sub_type,
+                from_ms,
+                to_ms,
+                limit=limit,
+                reverse=True,
+            )
+            rows = normalize_food_data(payload)
+            counts = database.store_food_rows(rows)
+            result = _sync_summary_result(
+                domain,
+                event_type,
+                sub_type,
+                status="ok" if rows else "empty",
+                records_retrieved=len(rows),
+                **counts,
+            )
+        except Exception as exc:
+            result = _sync_summary_result(
+                domain,
+                event_type,
+                sub_type,
+                status="error",
+                error=type(exc).__name__,
+            )
+        domains.append(result)
+        database.record_sync_domain(run_id, result)
+
         error_count = sum(row["status"] == "error" for row in domains)
         status = "error" if error_count == len(domains) else "partial" if error_count else "ok"
         summary = {
@@ -5956,6 +6089,90 @@ def cmd_stress(args: argparse.Namespace) -> None:
             )
     if args.samples:
         print(f"Stored samples in window: {len(result['samples'])}")
+
+
+def read_food_report(
+    database: Database,
+    days: int,
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Build a factual, raw-payload-free Food report from SQLite."""
+    if days < 1:
+        raise ValueError("days must be at least 1")
+    instant = now or datetime.now(timezone.utc)
+    local_today = instant.astimezone(ZoneInfo(FRESHNESS_TIMEZONE)).date()
+    from_date = (local_today - timedelta(days=days - 1)).isoformat()
+    to_date = local_today.isoformat()
+    entries = database.fetch_food_entries(from_date, to_date)
+    today_count = sum(row["date"] == to_date for row in entries)
+    return {
+        "timezone": FRESHNESS_TIMEZONE,
+        "from_date": from_date,
+        "to_date": to_date,
+        "latest_entry_date": database.fetch_latest_food_entry_date(),
+        "today_log_status": (
+            "food_logged" if today_count else "no_food_logged"
+        ),
+        "today_entry_count": today_count,
+        "entries": entries,
+        "daily_totals": {
+            "available": False,
+            "reason": "no_native_daily_summary_implemented",
+        },
+    }
+
+
+def cmd_food(args: argparse.Namespace) -> None:
+    database = Database(_db_path_from_args(args))
+    try:
+        result = read_food_report(database, args.days)
+    finally:
+        database.close()
+    if args.json:
+        _emit_json(result, args)
+        return
+    print(f"Food / Nutrition — {result['from_date']} to {result['to_date']}")
+    print(
+        "Today: "
+        + (
+            f"{result['today_entry_count']} logged entr"
+            + ("y" if result["today_entry_count"] == 1 else "ies")
+            if result["today_entry_count"]
+            else "no food logged"
+        )
+    )
+    if not result["entries"]:
+        print("No stored Food entries in the requested window.")
+        return
+    print("Entries:")
+    for entry in result["entries"]:
+        name = entry["food_name"] or "Unnamed food"
+        print(
+            f"  {entry['date']} {entry['meal_label'] or 'Unknown meal'}: "
+            f"{name}"
+        )
+        facts = []
+        if entry["measure_weight"] is not None:
+            facts.append(
+                f"weight={entry['measure_weight']:g}"
+                + (
+                    f" {entry['weight_unit']}"
+                    if entry["weight_unit"]
+                    else ""
+                )
+            )
+        for key, label in (
+            ("energy", "energy"),
+            ("carbohydrates", "carbohydrates"),
+            ("protein", "protein"),
+            ("fat_total", "fat"),
+        ):
+            if entry[key] is not None:
+                facts.append(f"{label}={entry[key]:g}")
+        if facts:
+            print("    " + ", ".join(facts))
+    print("Daily totals: no native daily summary exposed")
 
 
 def cmd_sync_db(args: argparse.Namespace) -> None:
@@ -6668,6 +6885,15 @@ def main() -> None:
         help="Include stored native sparse Stress samples",
     )
     sp.set_defaults(func=cmd_stress)
+
+    sp = sub.add_parser(
+        "food",
+        help="Factual Food/Nutrition entries from SQLite",
+    )
+    _add_days(sp)
+    _add_json(sp)
+    _add_db(sp)
+    sp.set_defaults(func=cmd_food)
 
     sp = sub.add_parser("sync-db", help="Fetch native Zepp metrics into SQLite")
     _add_days(sp)

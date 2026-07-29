@@ -1007,7 +1007,7 @@ defer remaining work to a focused Codex-assisted corpus/protobuf task.
 
 ## Food / Nutrition production closeout
 
-Status: CORE CONTRACT SOLVED
+Status: CORE CONTRACT SOLVED / FOOD LOG IMPLEMENTED IN I002
 
 Earlier uncertainty around production provenance is now superseded by live
 production captures.
@@ -1040,6 +1040,14 @@ The Food Insight endpoint is separate and must not be confused with actual
 consumed food records.
 
 Do not restart broad Food/Nutrition research.
+
+Current implementation note:
+
+- SQLite schema v8 stores `food_entries` by native `foodLogId`.
+- `sync-db` reads `Food / real_data`.
+- `food --days N` exposes canonical entries without raw payloads.
+- Food Goals remain deferred pending a proven property read method.
+- No Food/Goal write operations or derived daily totals were added.
 
 
 
@@ -1173,4 +1181,3 @@ This becomes the next dedicated research/implementation batch after the current
 legacy closeout.
 
 Do not restart the broad audit.
-

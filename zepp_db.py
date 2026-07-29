@@ -18,7 +18,7 @@ from typing import Any, Iterator
 from zoneinfo import ZoneInfo
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 DEFAULT_DB_PATH = Path("data") / "zepp_health.db"
 _REMOVED_KEYS = {
     "app_token", "apptoken", "authorization", "cookie", "cookies",
@@ -612,6 +612,42 @@ CREATE INDEX IF NOT EXISTS idx_stress_samples_event_date
 ON stress_samples(event_date);
 """
 
+SCHEMA_V8_SQL = """
+CREATE TABLE IF NOT EXISTS food_entries (
+    record_key TEXT PRIMARY KEY,
+    food_log_id TEXT NOT NULL,
+    event_date TEXT,
+    timestamp_ms INTEGER,
+    meal_type NUMERIC,
+    meal_label TEXT,
+    meal_name TEXT,
+    food_name TEXT,
+    measure_weight REAL,
+    weight_unit TEXT,
+    energy REAL,
+    carbohydrates REAL,
+    protein REAL,
+    fat_total REAL,
+    fiber REAL,
+    servings REAL,
+    labels_json TEXT,
+    emoji TEXT,
+    recognize_type NUMERIC,
+    recognize_source_type NUMERIC,
+    source_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_food_entries_food_log_id
+ON food_entries(food_log_id);
+
+CREATE INDEX IF NOT EXISTS idx_food_entries_event_date
+ON food_entries(event_date);
+
+CREATE INDEX IF NOT EXISTS idx_food_entries_meal_type
+ON food_entries(meal_type);
+"""
+
 
 class Database:
     def __init__(self, path: str | Path) -> None:
@@ -701,6 +737,165 @@ class Database:
                 )
                 self.connection.execute("PRAGMA user_version = 7")
                 current = 7
+            if current < 8:
+                self.connection.executescript(SCHEMA_V8_SQL)
+                self.connection.execute(
+                    "INSERT OR REPLACE INTO schema_meta(key, value) "
+                    "VALUES ('schema_version', '8')"
+                )
+                self.connection.execute("PRAGMA user_version = 8")
+                current = 8
+
+    def store_food_rows(
+        self,
+        rows: list[dict[str, Any]],
+    ) -> dict[str, int]:
+        """Persist canonical Food/real_data entries by native foodLogId."""
+        stats = {"inserted": 0, "updated": 0, "unchanged": 0}
+        now = utc_now()
+        columns = (
+            "food_log_id",
+            "event_date",
+            "timestamp_ms",
+            "meal_type",
+            "meal_label",
+            "meal_name",
+            "food_name",
+            "measure_weight",
+            "weight_unit",
+            "energy",
+            "carbohydrates",
+            "protein",
+            "fat_total",
+            "fiber",
+            "servings",
+            "labels_json",
+            "emoji",
+            "recognize_type",
+            "recognize_source_type",
+            "source_json",
+        )
+        with self.transaction():
+            for row in rows:
+                food_log_id = row.get("food_log_id")
+                if food_log_id in (None, ""):
+                    continue
+                record_key = f"food:{food_log_id}"
+                values = (
+                    str(food_log_id),
+                    row.get("date"),
+                    row.get("timestamp_ms"),
+                    row.get("meal_type"),
+                    row.get("meal_label"),
+                    row.get("meal_name"),
+                    row.get("food_name"),
+                    row.get("measure_weight"),
+                    row.get("weight_unit"),
+                    row.get("energy"),
+                    row.get("carbohydrates"),
+                    row.get("protein"),
+                    row.get("fat_total"),
+                    row.get("fiber"),
+                    row.get("servings"),
+                    json_text(row.get("labels"))
+                    if row.get("labels") is not None
+                    else None,
+                    row.get("emoji"),
+                    row.get("recognize_type"),
+                    row.get("recognize_source_type"),
+                    json_text(row.get("raw") or {}),
+                )
+                existing = self.connection.execute(
+                    "SELECT " + ", ".join(columns)
+                    + " FROM food_entries WHERE record_key=?",
+                    (record_key,),
+                ).fetchone()
+                if existing is None:
+                    self.connection.execute(
+                        """
+                        INSERT INTO food_entries (
+                            record_key, food_log_id, event_date, timestamp_ms,
+                            meal_type, meal_label, meal_name, food_name,
+                            measure_weight, weight_unit, energy, carbohydrates,
+                            protein, fat_total, fiber, servings, labels_json,
+                            emoji, recognize_type, recognize_source_type,
+                            source_json, updated_at
+                        ) VALUES (
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?, ?, ?
+                        )
+                        """,
+                        (record_key, *values, now),
+                    )
+                    stats["inserted"] += 1
+                    continue
+                equivalent = all(
+                    _stored_value_equivalent(existing[column], value)
+                    for column, value in zip(columns, values)
+                )
+                if equivalent:
+                    stats["unchanged"] += 1
+                    continue
+                assignments = ", ".join(
+                    f"{column}=?" for column in columns
+                )
+                self.connection.execute(
+                    f"UPDATE food_entries SET {assignments}, updated_at=? "
+                    "WHERE record_key=?",
+                    (*values, now, record_key),
+                )
+                stats["updated"] += 1
+        return stats
+
+    @staticmethod
+    def _safe_food_row(row: sqlite3.Row) -> dict[str, Any]:
+        result = dict(row)
+        meal_type = result.get("meal_type")
+        if isinstance(meal_type, str):
+            try:
+                result["meal_type"] = int(meal_type)
+            except ValueError:
+                pass
+        labels_json = result.pop("labels_json", None)
+        result["labels"] = (
+            json.loads(labels_json) if labels_json is not None else None
+        )
+        return result
+
+    def fetch_food_entries(
+        self,
+        from_date: str,
+        to_date: str,
+        *,
+        meal_type: int | str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return canonical Food entries without raw payload text."""
+        query = """
+            SELECT
+                food_log_id, event_date AS date, timestamp_ms, meal_type,
+                meal_label, meal_name, food_name, measure_weight, weight_unit,
+                energy, carbohydrates, protein, fat_total, fiber, servings,
+                labels_json, emoji, recognize_type, recognize_source_type
+            FROM food_entries
+            WHERE event_date BETWEEN ? AND ?
+        """
+        parameters: list[Any] = [from_date, to_date]
+        if meal_type is not None:
+            query += " AND meal_type=?"
+            parameters.append(str(meal_type))
+        query += " ORDER BY event_date DESC, timestamp_ms DESC, food_log_id"
+        return [
+            self._safe_food_row(row)
+            for row in self.connection.execute(query, parameters).fetchall()
+        ]
+
+    def fetch_latest_food_entry_date(self) -> str | None:
+        """Return the newest known Food entry date, if any."""
+        row = self.connection.execute(
+            "SELECT MAX(event_date) FROM food_entries "
+            "WHERE event_date IS NOT NULL"
+        ).fetchone()
+        return row[0] if row else None
 
 
     def store_stress_rows(
@@ -1722,6 +1917,7 @@ class Database:
         tables = (
             "hrv_samples", "hrv_daily", "wake_energy", "exertion_records",
             "stress_daily_records", "stress_samples",
+            "food_entries",
             "readiness_records", "sleep_related_readiness", "charge_records",
             "insight_records", "lifeload_records", "phn_daily_records", "phn_training_plans", "raw_payloads", "sync_runs",
         )

@@ -26,6 +26,7 @@ python3 zepp_health.py db-status
 python3 zepp_health.py daily-status --days 14 --from-db
 python3 zepp_health.py stress --days 7 --db data/zepp_health.db
 python3 zepp_health.py stress --days 1 --samples --db data/zepp_health.db --json
+python3 zepp_health.py food --days 7 --db data/zepp_health.db --json
 python3 zepp_health.py sync-activities --days 7 --db data/zepp_health.db
 python3 zepp_health.py activity-status --db data/zepp_health.db
 ```
@@ -51,6 +52,9 @@ normalized records and raw payload insertion use a SQLite transaction.
   `event_date`, including native min/max/avg, category proportions, and count.
 - `stress_samples`: only native sparse Stress timeline measurements, keyed by
   their epoch-millisecond timestamp; missing intervals are not synthesized.
+- `food_entries`: canonical native `Food / real_data` entries keyed by stable
+  `foodLogId`, with factual meal, amount, energy, nutrient, and recognition
+  fields plus sanitized internal source evidence.
 - `activities` and `activity_summary_metrics`: canonical native activity
   identity/time and factual metric envelopes.
 - `activity_streams` and `activity_samples`: independently sampled native GPS,
@@ -80,7 +84,7 @@ sidecar files.
 
 ## Migrations and deployment
 
-The current database schema version is 7. Future compatible schema
+The current database schema version is 8. Future compatible schema
 changes must increment the migration version and apply transactional migrations
 before normal reads/writes. The database is runtime state, not source code:
 
@@ -241,13 +245,12 @@ physical/mental components merely because the relationship is very strong.
 
 
 
-## Planned Food / Nutrition persistence contract
+## Food / Nutrition persistence
 
-The native Food contract is production-validated but first-class current
-SQLite persistence should follow the existing RAW -> NORMALIZED -> SEMANTIC ->
-QUALITY separation.
+Schema v8 adds `food_entries`. Native `foodLogId` is the stable logical key, so
+an edit updates one row and repeated identical syncs remain unchanged.
 
-Minimum factual fields to preserve:
+Persisted factual fields include:
 
 - native event timestamp
 - `foodLogId`
@@ -279,3 +282,13 @@ mealType semantic dictionary:
 6 Evening Snack
 
 Food Goals should be stored separately from individual Food Log records.
+I002 does not persist Goals because the current client has no proven property
+read method; no write behavior was added.
+
+The `food` CLI reads SQLite only and exposes canonical fields without
+`source_json`. It reports latest known entry date and whether food is logged
+today. `no_food_logged` is a factual user-entry state, not a sync failure or
+device-staleness judgment.
+
+No audited native daily nutrition summary is implemented. The CLI labels
+daily totals unavailable and does not silently sum entries or invent zeros.

@@ -1,6 +1,6 @@
-# Future implementation — native Food / Nutrition
+# Native Food / Nutrition implementation record
 
-Status: CONTRACT SOLVED / READY FOR IMPLEMENTATION
+Status: FOOD LOG IMPLEMENTED IN I002
 
 ## Native Food Log
 
@@ -64,17 +64,33 @@ Fields:
 
 Percentages must sum to 100.
 
-## Implementation target
+## Implementation status
 
-Add:
+Implemented:
 
-1. native Food fetch/read support
-2. normalizer
-3. canonical factual model
-4. SQLite persistence
+1. native `Food / real_data` event reads
+2. canonical normalizer
+3. factual Food entry model
+4. SQLite schema v8 persistence
 5. incremental sync/upsert by foodLogId
-6. CLI factual output
-7. tests using production fixtures
-8. future TRC nutrition features
+6. SQLite-only `food --days N` text/JSON CLI
+7. deterministic banana, mealType, migration, idempotency, read, and CLI tests
+
+Not implemented:
+
+- Food Goal read/write transport
+- derived or native daily nutrition totals
+- Food Insight as a factual source
+- nutrition recommendations
+
+The known macro split remains factual evidence:
+
+`carb_percent + protein_percent + fat_percent = 100`
+
+I002 does not silently normalize invalid splits and adds no goal mutation.
+
+Read-only live GET validation over 30 and 90 days returned a successful empty
+Food domain. The captured banana remains the non-empty production regression
+fixture.
 
 Do not use Food Insight as the factual source of nutrition intake.

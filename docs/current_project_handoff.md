@@ -442,7 +442,7 @@ five-minute intervals and does not expose stored raw payload text.
 
 ## Food / Nutrition — production-validated core contract
 
-Status: CORE CONTRACT SOLVED / IMPLEMENTATION-READY
+Status: FOOD LOG IMPLEMENTED / LIVE READ PATH RETURNED EMPTY
 
 Do NOT restart broad Food/Nutrition reverse engineering.
 
@@ -586,6 +586,28 @@ Keep separate:
 Future TRC/coach logic should consume factual Food Log + Goals data first.
 Food Insight may be preserved as optional advisory evidence but must not replace
 the factual nutrition layer.
+
+### Current Food Log implementation
+
+I002 implements the audited `Food / real_data` event source through:
+
+- canonical normalization with numeric-string handling
+- exact mealType labels with safe unknown-value fallback
+- SQLite schema v8 `food_entries`, keyed by native `foodLogId`
+- incremental `sync-db` persistence
+- raw-free database reads and `food --days N` CLI output
+
+No native daily nutrition summary was proven, so the CLI does not calculate or
+present entry sums as native totals. It explicitly reports native daily totals
+as unavailable.
+
+Food Goals remain separate. The property and fields are production-known, but
+the current client has no established safe property read contract. I002 does
+not add goal writes or speculative goal read transport.
+
+A read-only 30-day and 90-day production GET validation on 2026-07-29
+successfully returned an empty Food domain. This validates empty-state and
+sync handling but is not a non-empty live normalization fixture.
 
 
 

@@ -641,3 +641,28 @@ Stress freshness reuses the database factual-freshness system and the
 `current`, `stale`, or `missing`; sparse sample recency is not used.
 
 I001.5 was validated offline with unit tests and temporary SQLite CLI runs.
+
+
+## I002 — Native Food / Nutrition implementation
+
+Implemented the audited native Food Log contract:
+
+`/v2/users/me/events` with `eventType=Food`, `subType=real_data`.
+
+The canonical model preserves native `foodLogId`, timestamp/date, mealType and
+its proven label, names, measured weight/unit, energy, carbohydrates, protein,
+fat, fiber, servings, labels, emoji, recognition fields, and sanitized source
+evidence. Numeric strings become canonical numbers; missing nutrients remain
+missing.
+
+SQLite schema v8 adds `food_entries`, using stable `foodLogId` identity.
+Identical syncs are unchanged and a factual edit updates the existing logical
+entry. The SQLite-only `food --days N` CLI never dumps raw payloads.
+
+No native daily summary was proven or reconstructed. Food Goals remain
+separate and unimplemented because property read transport is not established;
+no Food or Goal writes were added.
+
+Read-only production validation over 30 and 90 days completed successfully but
+returned zero Food entries, so live empty-state behavior is validated while
+the controlled banana capture remains the non-empty regression evidence.

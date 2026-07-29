@@ -4,7 +4,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
@@ -86,6 +86,7 @@ def fixture_responses():
         ("all_day_stress", "all_day_stress"): {
         "items": []
     },
+        ("Food", "real_data"): {"items": []},
 }
 
 
@@ -799,7 +800,7 @@ class DatabaseTests(unittest.TestCase):
             "PRAGMA user_version"
         ).fetchone()[0]
 
-        self.assertEqual(schema_version, 7)
+        self.assertEqual(schema_version, SCHEMA_VERSION)
 
         rows = [
             {
@@ -1267,6 +1268,183 @@ class DatabaseTests(unittest.TestCase):
                 [row["value"] for row in result["samples"]],
                 [22, 81],
             )
+
+    def test_food_schema_v8_migration_and_idempotent_edit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "food.db"
+            db = Database(path)
+            self.assertEqual(db.connection.execute(
+                "PRAGMA user_version"
+            ).fetchone()[0], 8)
+            indexes = {
+                row["name"] for row in db.connection.execute(
+                    "PRAGMA index_list(food_entries)"
+                ).fetchall()
+            }
+            self.assertIn("idx_food_entries_food_log_id", indexes)
+            row = {
+                "food_log_id": "banana-id",
+                "date": "2026-07-28",
+                "timestamp_ms": 1785238560000,
+                "meal_type": 4,
+                "meal_label": "Afternoon Snack",
+                "meal_name": "Afternoon Snack",
+                "food_name": "Banana",
+                "measure_weight": 250,
+                "weight_unit": "g",
+                "energy": 218.75,
+                "carbohydrates": 56.25,
+                "protein": 2.7083333333,
+                "fat_total": 0.8333333333,
+                "fiber": 3.1,
+                "servings": 2,
+                "labels": ["fruit"],
+                "emoji": "🍌",
+                "recognize_type": 1,
+                "recognize_source_type": 2,
+                "raw": {"privateMetadata": "stored-only"},
+            }
+            self.assertEqual(
+                db.store_food_rows([row]),
+                {"inserted": 1, "updated": 0, "unchanged": 0},
+            )
+            self.assertEqual(
+                db.store_food_rows([row]),
+                {"inserted": 0, "updated": 0, "unchanged": 1},
+            )
+            row["measure_weight"] = 260
+            row["energy"] = 227.5
+            self.assertEqual(
+                db.store_food_rows([row]),
+                {"inserted": 0, "updated": 1, "unchanged": 0},
+            )
+            self.assertEqual(db.connection.execute(
+                "SELECT COUNT(*) FROM food_entries"
+            ).fetchone()[0], 1)
+            db.connection.execute("DROP TABLE food_entries")
+            db.connection.execute("PRAGMA user_version = 7")
+            db.connection.commit()
+            db.close()
+
+            migrated = Database(path)
+            self.assertEqual(migrated.connection.execute(
+                "PRAGMA user_version"
+            ).fetchone()[0], 8)
+            self.assertIsNotNone(migrated.connection.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name='food_entries'"
+            ).fetchone())
+            migrated.close()
+
+    def test_food_database_reads_and_cli_json_privacy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "food-cli.db"
+            today = datetime.now(
+                ZoneInfo("Europe/Ljubljana")
+            ).date()
+            yesterday = today - timedelta(days=1)
+            db = Database(path)
+            db.store_food_rows([
+                {
+                    "food_log_id": "breakfast-id",
+                    "date": today.isoformat(),
+                    "timestamp_ms": 2000,
+                    "meal_type": 1,
+                    "meal_label": "Breakfast",
+                    "food_name": "Banana",
+                    "energy": 210,
+                    "protein": None,
+                    "raw": {"secretFreeText": "must-not-leak"},
+                },
+                {
+                    "food_log_id": "dinner-id",
+                    "date": yesterday.isoformat(),
+                    "timestamp_ms": 1000,
+                    "meal_type": 5,
+                    "meal_label": "Dinner",
+                    "food_name": "Recorded dinner",
+                    "raw": {},
+                },
+            ])
+            entries = db.fetch_food_entries(
+                yesterday.isoformat(),
+                today.isoformat(),
+            )
+            self.assertEqual(
+                [entry["food_log_id"] for entry in entries],
+                ["breakfast-id", "dinner-id"],
+            )
+            self.assertEqual(entries[0]["meal_type"], 1)
+            self.assertIsNone(entries[0]["protein"])
+            self.assertEqual(
+                len(db.fetch_food_entries(
+                    yesterday.isoformat(),
+                    today.isoformat(),
+                    meal_type=5,
+                )),
+                1,
+            )
+            db.close()
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "zepp_health.py",
+                    "food",
+                    "--days",
+                    "2",
+                    "--db",
+                    str(path),
+                    "--json",
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            result = json.loads(completed.stdout)
+            self.assertEqual(len(result["entries"]), 2)
+            self.assertEqual(result["entries"][0]["food_name"], "Banana")
+            self.assertEqual(result["today_log_status"], "food_logged")
+            self.assertFalse(result["daily_totals"]["available"])
+            self.assertNotIn("secretFreeText", completed.stdout)
+            self.assertNotIn("source_json", completed.stdout)
+
+    def test_sync_native_metrics_food_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            db = Database(Path(directory) / "food-sync.db")
+            responses = fixture_responses()
+            responses[("Food", "real_data")] = {"items": [{
+                "eventType": "Food",
+                "subType": "real_data",
+                "timestamp": 1785238560000,
+                "timezone": "Europe/Ljubljana",
+                "value": {
+                    "foodLogId": "banana-sync-id",
+                    "mealType": 4,
+                    "foodName": "Banana",
+                    "measureWeight": "250",
+                    "weightUnit": "g",
+                    "energy": "218.75",
+                    "carbohydrates": "56.25",
+                    "protein": "2.7083333333",
+                    "fatTotal": "0.8333333333",
+                },
+            }]}
+            first = sync_native_metrics(FakeClient(responses), db, 7)
+            food = next(
+                row for row in first["domains"]
+                if row["domain"] == "food"
+            )
+            self.assertEqual(food["inserted"], 1)
+            second = sync_native_metrics(FakeClient(responses), db, 7)
+            food = next(
+                row for row in second["domains"]
+                if row["domain"] == "food"
+            )
+            self.assertEqual(food["inserted"], 0)
+            self.assertEqual(food["updated"], 0)
+            self.assertEqual(food["unchanged"], 1)
+            db.close()
 
 
 if __name__ == "__main__":

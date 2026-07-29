@@ -18,11 +18,92 @@ from zepp_health import (
     normalize_phn_training_plan_data,
     normalize_wake_data,
     _normalize_value_records,
-
-    normalize_stress_data,)
+    food_meal_label,
+    normalize_food_data,
+    normalize_stress_data,
+)
 
 
 class NativeMetricsTests(unittest.TestCase):
+    def test_food_banana_fixture_normalization(self) -> None:
+        payload = {"items": [{
+            "eventType": "Food",
+            "subType": "real_data",
+            "timestamp": "1785238560000",
+            "timezone": "Europe/Ljubljana",
+            "value": {
+                "foodLogId": "banana-controlled-id",
+                "mealType": "4",
+                "mealName": "Afternoon Snack",
+                "foodName": "Banana",
+                "measureWeight": "250",
+                "weightUnit": "g",
+                "energy": "218.75",
+                "carbohydrates": "56.25",
+                "protein": "2.7083333333",
+                "fatTotal": "0.8333333333",
+                "fiber": "3.1",
+                "servings": "2",
+                "labels": ["fruit"],
+                "emoji": "🍌",
+                "recognizeType": 1,
+                "recognizeSourceType": 2,
+            },
+        }]}
+        rows = normalize_food_data(payload)
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["food_log_id"], "banana-controlled-id")
+        self.assertEqual(row["timestamp_ms"], 1785238560000)
+        self.assertEqual(row["date"], "2026-07-28")
+        self.assertEqual(row["meal_type"], 4)
+        self.assertEqual(row["meal_label"], "Afternoon Snack")
+        self.assertEqual(row["food_name"], "Banana")
+        self.assertEqual(row["measure_weight"], 250)
+        self.assertEqual(row["energy"], 218.75)
+        self.assertEqual(row["carbohydrates"], 56.25)
+        self.assertAlmostEqual(row["protein"], 2.7083333333)
+        self.assertAlmostEqual(row["fat_total"], 0.8333333333)
+        self.assertEqual(row["fiber"], 3.1)
+        self.assertEqual(row["servings"], 2)
+        self.assertEqual(row["provenance"]["eventType"], "Food")
+
+    def test_food_meal_types_and_missing_nutrients(self) -> None:
+        expected = {
+            1: "Breakfast",
+            2: "Morning Snack",
+            3: "Lunch",
+            4: "Afternoon Snack",
+            5: "Dinner",
+            6: "Evening Snack",
+        }
+        for meal_type, label in expected.items():
+            self.assertEqual(food_meal_label(meal_type), label)
+            self.assertEqual(food_meal_label(str(meal_type)), label)
+        self.assertEqual(food_meal_label(99), "Unknown (99)")
+
+        row = normalize_food_data({"items": [{
+            "eventType": "Food",
+            "subType": "real_data",
+            "date": "2026-07-28",
+            "value": {
+                "foodLogId": "missing-nutrients",
+                "mealType": 99,
+                "foodName": "Unresolved food",
+            },
+        }]})[0]
+        self.assertEqual(row["meal_type"], 99)
+        self.assertEqual(row["meal_label"], "Unknown (99)")
+        for field in (
+            "energy",
+            "carbohydrates",
+            "protein",
+            "fat_total",
+            "fiber",
+            "servings",
+        ):
+            self.assertIsNone(row[field])
+
     def test_hrv_real_data_preserves_samples_and_timestamp_inputs(self) -> None:
         payload = {"items": [{
             "date": "2026-07-08",
