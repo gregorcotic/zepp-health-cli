@@ -1036,10 +1036,7 @@ def _activity_distance_metres(
     record: dict[str, Any],
 ) -> tuple[int | float | None, str | None]:
     """Resolve distance using the established high-precision/dis precedence."""
-    if (
-        _activity_number(record.get("type")) == 105
-        and _activity_number(record.get("sport_mode")) == 0
-    ):
+    if is_alpine_ski_activity(record):
         ski_distance = _activity_usable_metric_number(
             record.get("climb_dis_descend")
         )
@@ -1058,6 +1055,14 @@ def _activity_sport_mapping(record: dict[str, Any]) -> dict[str, Any] | None:
     if not isinstance(type_value, int) or not isinstance(mode_value, int):
         return None
     return ACTIVITY_SPORT_MAPPINGS.get((type_value, mode_value))
+
+
+def is_alpine_ski_activity(record: dict[str, Any]) -> bool:
+    """Return whether an activity is the proven Alpine Ski pair (105, 0)."""
+    return (
+        _activity_number(record.get("type")) == 105
+        and _activity_number(record.get("sport_mode")) == 0
+    )
 
 
 def interpret_activity_metrics(record: dict[str, Any]) -> dict[str, Any]:
@@ -1120,7 +1125,7 @@ def interpret_activity_metrics(record: dict[str, Any]) -> dict[str, Any]:
     climbing_ascent = None
     ascent_metric_invalid = False
     ascent_metric_missing = False
-    if mapping["sport_family"] == "Ski":
+    if is_alpine_ski_activity(record):
         descent = _activity_usable_metric_number(record.get("altitude_descend"))
         normalized["vertical_descent_m"] = {
             "value": descent,
@@ -1134,10 +1139,12 @@ def interpret_activity_metrics(record: dict[str, Any]) -> dict[str, Any]:
             ),
         }
         normalized["elevation_loss_m"] = dict(normalized["vertical_descent_m"])
+        normalized["ski_vertical_m"] = dict(normalized["vertical_descent_m"])
+        ski_ascent = _activity_usable_metric_number(record.get("altitude_ascend"))
         normalized["elevation_gain_m"] = {
-            "value": None,
-            "source_field": None,
-            "semantic_confidence": "PROVEN",
+            "value": ski_ascent,
+            "source_field": "altitude_ascend" if ski_ascent is not None else None,
+            "semantic_confidence": "PROVEN" if ski_ascent is not None else "UNKNOWN",
             "reason": "ski_lift_ascent_is_not_athlete_powered_climbing",
         }
     elif profile["athlete_powered_ascent"]:
@@ -2522,7 +2529,9 @@ def canonicalize_activity(
         if not isinstance(item, dict):
             if mapping is None:
                 missing_status = "UNKNOWN"
-            elif name == "vertical_descent_m":
+            elif name == "vertical_descent_m" or (
+                name == "ski_vertical_m" and is_alpine_ski_activity(history_record)
+            ):
                 missing_status = "NOT_APPLICABLE"
             elif mapping["sport_family"] in {"Swimming", "Cross-training"}:
                 missing_status = "NOT_APPLICABLE"
@@ -2648,7 +2657,12 @@ def canonicalize_activity(
         ),
         "reported_elevation_gain_m": semantic_metric("elevation_gain_m"),
         "reported_elevation_loss_m": semantic_metric("elevation_loss_m"),
+        # Stable canonical names. The reported_* aliases above remain for
+        # compatibility with the first canonical activity contract.
+        "elevation_gain_m": semantic_metric("elevation_gain_m"),
+        "elevation_loss_m": semantic_metric("elevation_loss_m"),
         "vertical_descent_m": semantic_metric("vertical_descent_m"),
+        "ski_vertical_m": semantic_metric("ski_vertical_m"),
         "derived_elevation_gain_m": _canonical_metric(
             None,
             "m",

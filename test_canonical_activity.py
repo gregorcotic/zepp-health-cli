@@ -159,13 +159,55 @@ class CanonicalActivityTests(unittest.TestCase):
         }
         activity = canonicalize_activity(history, detail(500, altitude="96583;191362;"))
         self.assertEqual(activity["summary"]["vertical_descent_m"]["value"], 5921)
+        self.assertEqual(activity["summary"]["ski_vertical_m"]["value"], 5921)
+        self.assertEqual(activity["summary"]["elevation_gain_m"]["value"], 0)
+        self.assertEqual(activity["summary"]["elevation_loss_m"]["value"], 5921)
         self.assertEqual(
             activity["summary"]["reported_elevation_gain_m"]["status"],
-            "NOT_APPLICABLE",
+            "AVAILABLE",
         )
-        self.assertIsNone(
-            activity["summary"]["reported_elevation_gain_m"]["value"]
+
+    def test_audited_ski_days_have_stable_vertical_semantics(self):
+        for track_id, activity_date, vertical in (
+            ("1702541656", "2023-12-14", 8058),
+            ("1702626315", "2023-12-15", 6183),
+            ("1702711638", "2023-12-16", 9852),
+        ):
+            activity = canonicalize_activity(
+                {
+                    "trackid": track_id,
+                    "sport_title": (
+                        "Kronplatz day 3"
+                        if activity_date == "2023-12-16" else ""
+                    ),
+                    "activity_date": activity_date,
+                    "type": 105,
+                    "sport_mode": 0,
+                    "altitude_ascend": 0,
+                    "altitude_descend": vertical,
+                    "climb_dis_descend": 40955,
+                },
+                detail(int(track_id)),
+            )
+            self.assertEqual(activity["summary"]["ski_vertical_m"]["value"], vertical)
+            self.assertEqual(activity["summary"]["elevation_gain_m"]["value"], 0)
+            self.assertEqual(activity["summary"]["elevation_loss_m"]["value"], vertical)
+
+    def test_hiking_ascent_does_not_create_ski_vertical(self):
+        activity = canonicalize_activity(
+            {
+                "trackid": 501,
+                "type": 22,
+                "sport_mode": 0,
+                "altitude_ascend": 1915,
+                "altitude_descend": 1880,
+            },
+            detail(501),
         )
+        self.assertEqual(activity["summary"]["elevation_gain_m"]["value"], 1915)
+        self.assertEqual(activity["summary"]["elevation_loss_m"]["value"], 1880)
+        self.assertEqual(activity["summary"]["ski_vertical_m"]["status"], "UNKNOWN")
+        self.assertIsNone(activity["summary"]["ski_vertical_m"]["value"])
 
     def test_safe_serializer_hides_coordinates_samples_notes_and_source(self):
         history = {

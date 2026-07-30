@@ -92,8 +92,10 @@ negative values are not globally discarded.
 
 - Hiking retains reported ascent/descent and native altitude separately. The
   future derived-ascent slot remains empty for Ojstrica validation.
-- Ski retains `altitude_descend` as vertical descent and never maps lift gain
-  to athlete-powered ascent.
+- Alpine Ski is identified only by `(type, sport_mode)=(105,0)`. It retains
+  `altitude_descend` as `elevation_loss_m` and `ski_vertical_m`, sets
+  `elevation_gain_m` to native `altitude_ascend` (zero in the audited
+  fixtures), and never maps lift gain to athlete-powered climbing load.
 - Pool Swim preserves `lap`, `pool_swim_pace`, `pool_stroke_speed`, and
   `currentDistance` records structurally without guessing component meanings.
 - Open Water Swim supports GPS, HR, speed, pace, and stroke evidence while

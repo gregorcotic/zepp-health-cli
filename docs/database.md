@@ -60,7 +60,10 @@ normalized records and raw payload insertion use a SQLite transaction.
   snapshot per `event_date`, including the conservative `wtl_sum`, native
   daily load, thresholds, timestamps, and device provenance.
 - `activities` and `activity_summary_metrics`: canonical native activity
-  identity/time and factual metric envelopes.
+  identity/time and factual metric envelopes. Activity summaries include
+  `elevation_gain_m`, `elevation_loss_m`, and sport-specific
+  `ski_vertical_m`; the latter is populated only for the proven Alpine Ski
+  `(type, sport_mode)=(105,0)` mapping.
 - `activity_streams` and `activity_samples`: independently sampled native GPS,
   altitude, HR, cadence, and unresolved structural streams.
 - `activity_laps`, `activity_notes`, `activity_quality_flags`, and
@@ -68,6 +71,10 @@ normalized records and raw payload insertion use a SQLite transaction.
   and audit evidence.
 - `activity_sync_runs`: activity-only attempted/successful freshness and
   bounded synchronization results.
+
+`ski_vertical_m` is an additive metric-envelope name, not a SQLite column.
+No schema migration is required: summary metrics are already persisted by
+`metric_name`, and existing databases continue to read/write unchanged.
 
 Normalized tables use deterministic `record_key` values and UPSERT behavior.
 Repeating a sync does not create duplicate logical records. Raw payloads are

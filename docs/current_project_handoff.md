@@ -35,6 +35,7 @@ Do not repeat broad research into:
 - canonical native activity model
 - native activity persistence/incremental sync
 - Ski descent semantics
+- Sport-specific canonical `ski_vertical_m` semantics
 - optional-sensor absence semantics
 - known altitude sentinel handling
 - LifeLoad vs BioCharge distinction

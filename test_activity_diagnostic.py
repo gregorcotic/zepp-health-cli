@@ -689,8 +689,11 @@ class ActivityDiagnosticTests(unittest.TestCase):
             result["normalized_metrics"]["vertical_descent_m"]["source_field"],
             "altitude_descend",
         )
-        self.assertIsNone(
-            result["normalized_metrics"]["elevation_gain_m"]["value"]
+        self.assertEqual(
+            result["normalized_metrics"]["elevation_gain_m"]["value"], 0
+        )
+        self.assertEqual(
+            result["normalized_metrics"]["ski_vertical_m"]["value"], 5913
         )
         self.assertFalse(result["climbing_load"]["eligible"])
         self.assertIsNone(result["climbing_load"]["athlete_powered_ascent_m"])

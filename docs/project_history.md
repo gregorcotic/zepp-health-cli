@@ -23,6 +23,14 @@ performed on the MacBook account and must not expose credentials.
   approximately 5913 m vertical descent; it must never be presented as ascent
   or athlete-powered climbing load. Regression tests protect this rule.
 
+- S002.1: added explicit canonical `ski_vertical_m` semantics for the
+  evidence-backed Alpine Ski `(105,0)` pair. Ski `elevation_gain_m` preserves
+  native `altitude_ascend` (zero in audited days), while `elevation_loss_m`
+  and `ski_vertical_m` use native `altitude_descend`. Persistence remains
+  additive through the existing metric-name envelope, so no migration is
+  required. The sibling `coach-data-bridge` was not modified; its Strava
+  historical projection remains a separate follow-up.
+
 ## B006 — Production automation
 
 Problem: validated SQLite synchronization still required manual operation on

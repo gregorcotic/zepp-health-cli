@@ -280,7 +280,10 @@ class ActivityStorageTests(unittest.TestCase):
         }
         self.assertEqual(metrics["vertical_descent_m"], (5921, "AVAILABLE"))
         self.assertEqual(
-            metrics["reported_elevation_gain_m"], (None, "NOT_APPLICABLE")
+            metrics["ski_vertical_m"], (5921, "AVAILABLE")
+        )
+        self.assertEqual(
+            metrics["reported_elevation_gain_m"], (0, "AVAILABLE")
         )
 
         pool_history = history_record(
@@ -480,7 +483,10 @@ class ActivityStorageTests(unittest.TestCase):
         connection.commit()
         connection.close()
         self.db = Database(path)
-        self.assertEqual(SCHEMA_VERSION, 4)
+        self.assertEqual(
+            self.db.connection.execute("PRAGMA user_version").fetchone()[0],
+            SCHEMA_VERSION,
+        )
         self.assertEqual(
             self.db.connection.execute(
                 "SELECT COUNT(*) FROM hrv_samples"
@@ -488,6 +494,10 @@ class ActivityStorageTests(unittest.TestCase):
             1,
         )
         self.db.migrate()
+        self.assertEqual(
+            self.db.connection.execute("PRAGMA user_version").fetchone()[0],
+            SCHEMA_VERSION,
+        )
         self.assertEqual(
             self.db.connection.execute("PRAGMA foreign_key_check").fetchall(),
             [],
