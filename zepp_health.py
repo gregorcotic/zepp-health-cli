@@ -680,9 +680,16 @@ ACTIVITY_COVERAGE_FIELDS = (
     "downhill_max_altitude_desend", "averageAirTemp", "highestAirTemp",
     "lowestAirTemp", "avg_pressure", "max_pressure", "min_pressure",
     "avg_slope", "max_slope", "spo2_min", "spo2_max",
+    "maximumDepth", "divingAverageDepth", "averageMaxDepth",
+    "numberOfDives", "averageDiveSpeed", "maximumDiveSpeed",
+    "totalDiveTimeWithMillis", "avgDiveTimeWithMillis",
+    "maxDiveTimeWithMillis", "totalSurfaceTimeWithMillis",
+    "avgSurfaceTimeWithMillis", "supportedMaxDepth", "avg_temperature",
+    "max_temperature", "min_temperature",
 )
 ACTIVITY_UNPROVEN_NEGATIVE_CANDIDATES = {-1, -100, -20000, -274}
 ACTIVITY_SPORT_CATALOG = {
+    (196, 0): ("Outdoor Free Diving", "Free Diving", False),
     (105, 0): ("Ski", "Ski", False),
     (130, 0): ("Cross-training", "Cross-training", False),
     (14, 0): ("Pool Swim", "Swimming", False),
@@ -733,6 +740,7 @@ ACTIVITY_SPORT_MAPPINGS = {
     for key, (name, family, coach_mode) in ACTIVITY_SPORT_CATALOG.items()
 }
 ACTIVITY_PROVEN_METRIC_SEMANTICS = {
+    (196, 0),
     (105, 0),
     (130, 0),
     (22, 0),
@@ -794,6 +802,19 @@ ACTIVITY_SPORT_SEMANTICS = {
         "notes": (
             "altitude_descend is vertical descent; lift-assisted ascent is not "
             "athlete-powered climbing load"
+        ),
+    },
+    "Free Diving": {
+        "primary_metrics": (
+            "duration", "depth", "dive_count", "diving_speed",
+            "surface_recovery", "heart_rate", "temperature", "training_load",
+        ),
+        "athlete_powered_ascent": False,
+        "climbing_effort_relevant": False,
+        "semantic_confidence": "PROVEN",
+        "notes": (
+            "depth is positive distance below the water surface and is never "
+            "altitude, elevation, or ski vertical"
         ),
     },
 }
@@ -1901,7 +1922,8 @@ ACTIVITY_DETAIL_STREAM_FIELDS = (
     "correct_altitude", "heart_rate", "speed", "pace", "gait", "cadence",
     "power_meter", "lap", "kilo_pace", "mile_pace", "stroke_speed",
     "coaching_segment", "pause", "distance", "accuracy", "spo2", "flag",
-    "bearing", "course", "daily_performance_info",
+    "bearing", "course", "daily_performance_info", "divingDepth",
+    "temperature",
     "rope_skipping_frequency", "weather_info", "golf_swing_rt_data",
 )
 ACTIVITY_DETAIL_TEXT_KEYS = {
@@ -1927,6 +1949,7 @@ ACTIVITY_DETAIL_SCHEMA_ONLY_FIELDS = {
     "hyroxTimelines",
 }
 ACTIVITY_DETAIL_PRODUCTION_PROVEN_PAIRS = {
+    (196, 0),   # Outdoor Free Diving
     (22, 0),    # Hiking / Ojstrica
     (130, 0),   # Cross-training
     (14, 0),    # Pool Swim
@@ -2004,7 +2027,10 @@ def _canonical_sport_capabilities(
     if mapping is None:
         return {
             key: "UNKNOWN"
-            for key in ("gps", "altitude", "heart_rate", "cadence", "power", "laps")
+            for key in (
+                "gps", "altitude", "depth", "heart_rate", "temperature",
+                "cadence", "power", "laps",
+            )
         }
     family = mapping["sport_family"]
     name = mapping["sport_name"]
@@ -2015,18 +2041,21 @@ def _canonical_sport_capabilities(
     )
     altitude = (
         "NOT_APPLICABLE"
-        if family in {"Swimming", "Cross-training"}
+        if family in {"Swimming", "Cross-training", "Free Diving"}
         else "SUPPORTED"
     )
     return {
         "gps": gps,
         "altitude": altitude,
+        "depth": "SUPPORTED" if family == "Free Diving" else "NOT_APPLICABLE",
         "heart_rate": "SUPPORTED",
+        "temperature": "SUPPORTED" if family == "Free Diving" else "UNKNOWN",
         "cadence": "SUPPORTED_OPTIONAL_SENSOR" if family == "Cycling"
         else "NOT_APPLICABLE",
         "power": "SUPPORTED_OPTIONAL_SENSOR" if family == "Cycling"
         else "NOT_APPLICABLE",
-        "laps": "SUPPORTED" if name == "Pool Swim" else "UNKNOWN",
+        "laps": "SUPPORTED"
+        if name in {"Pool Swim", "Outdoor Free Diving"} else "UNKNOWN",
     }
 
 
@@ -2284,6 +2313,74 @@ def _canonical_delta_pair_stream(
     }
 
 
+def _canonical_float_delta_stream(
+    payload: dict[str, Any],
+    field: str,
+    *,
+    capability: str,
+    unit: str,
+    positive_only: bool = False,
+    semantic_rule: str | None = None,
+) -> dict[str, Any]:
+    """Decode a native delta-time/delta-value stream without integer coercion."""
+    entries = _detail_entries(payload.get(field))
+    if not entries:
+        return {
+            "status": "NOT_APPLICABLE" if capability == "NOT_APPLICABLE" else "UNKNOWN",
+            "sample_count": 0,
+            "samples": [],
+            "source_path": f"detail.{field}",
+            "semantic_confidence": "PRODUCTION_PROVEN",
+        }
+    elapsed = 0
+    current = 0.0
+    samples: list[dict[str, Any]] = []
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, str):
+            samples = []
+            break
+        parts = entry.split(",")
+        if len(parts) < 2:
+            samples = []
+            break
+        try:
+            delta_time = int(parts[0])
+            component = float(parts[1])
+        except ValueError:
+            samples = []
+            break
+        if delta_time < 0 or not math.isfinite(component):
+            samples = []
+            break
+        elapsed += delta_time
+        current = component if index == 0 else current + component
+        if positive_only and current < -0.00001:
+            samples = []
+            break
+        samples.append({
+            "offset_s": elapsed,
+            "value": max(0.0, current) if positive_only else current,
+            "status": "AVAILABLE",
+            "raw": parts,
+        })
+    valid = len(samples) == len(entries)
+    return {
+        "status": "AVAILABLE" if valid else "INVALID",
+        "sample_count": len(entries),
+        "samples": samples if valid else [],
+        "source_path": f"detail.{field}",
+        "unit": unit,
+        "semantic_confidence": "PRODUCTION_PROVEN",
+        "provenance": _canonical_provenance(
+            "/v1/sport/run/detail.json",
+            f"detail.{field}",
+            raw_encoding="semicolon delta-time/delta-value records",
+            normalization="independent floating-point delta accumulation",
+            semantic_rule=semantic_rule,
+        ),
+    }
+
+
 def _canonical_structural_stream(
     payload: dict[str, Any],
     field: str,
@@ -2372,6 +2469,34 @@ def _canonical_history_metric(
             confidence=semantic_confidence,
         ),
         semantic_confidence=semantic_confidence if value is not None else "UNKNOWN",
+    )
+
+
+def _canonical_history_millis_metric(
+    record: dict[str, Any], field: str,
+) -> dict[str, Any]:
+    raw = record.get(field)
+    value = _activity_usable_metric_number(raw)
+    if _activity_is_unavailable_sentinel(raw):
+        status = "SENTINEL_UNAVAILABLE"
+        seconds = None
+    elif value is not None:
+        status = "AVAILABLE"
+        seconds = value / 1000
+    else:
+        status = "INVALID" if field in record and raw not in (None, "") else "UNKNOWN"
+        seconds = None
+    return _canonical_metric(
+        seconds,
+        "s",
+        status,
+        raw_value=raw if field in record else None,
+        provenance=_canonical_provenance(
+            "/v1/sport/run/history.json",
+            f"history.summary.{field}",
+            normalization="milliseconds / 1000",
+        ),
+        semantic_confidence="PRODUCTION_PROVEN" if seconds is not None else "UNKNOWN",
     )
 
 
@@ -2481,6 +2606,14 @@ def canonicalize_activity(
         capabilities["altitude"],
         scaling_confidence=altitude_scaling_confidence,
     )
+    depth = _canonical_float_delta_stream(
+        payload_for_streams,
+        "divingDepth",
+        capability=capabilities["depth"],
+        unit="m",
+        positive_only=True,
+        semantic_rule="positive distance below surface; never altitude or elevation",
+    )
     heart_rate = _canonical_delta_pair_stream(
         payload_for_streams,
         "heart_rate",
@@ -2515,7 +2648,14 @@ def canonicalize_activity(
     if power["status"] == "SUPPORTED_BUT_NOT_RECORDED":
         quality_flags.append("POWER_SENSOR_NOT_RECORDED")
 
-    notes_text = payload_for_streams.get("memo")
+    detail_note = payload_for_streams.get("memo")
+    history_note = history_record.get("sportNotes")
+    notes_text = detail_note if isinstance(detail_note, str) and detail_note else history_note
+    notes_source_path = (
+        "detail.memo"
+        if isinstance(detail_note, str) and detail_note
+        else "history.summary.sportNotes"
+    )
     notes_present = isinstance(notes_text, str) and bool(notes_text)
     if notes_present:
         quality_flags.append("WORKOUT_NOTES_AVAILABLE")
@@ -2533,7 +2673,9 @@ def canonicalize_activity(
                 name == "ski_vertical_m" and is_alpine_ski_activity(history_record)
             ):
                 missing_status = "NOT_APPLICABLE"
-            elif mapping["sport_family"] in {"Swimming", "Cross-training"}:
+            elif mapping["sport_family"] in {
+                "Swimming", "Cross-training", "Free Diving",
+            }:
                 missing_status = "NOT_APPLICABLE"
             else:
                 missing_status = "UNKNOWN"
@@ -2670,6 +2812,67 @@ def canonicalize_activity(
             reason="future_altitude_validation_slot",
         ),
     }
+    if mapping is not None and mapping["sport_family"] == "Free Diving":
+        summary.update({
+            "max_depth_m": _canonical_history_metric(
+                history_record, "maximumDepth", unit="m"
+            ),
+            "average_depth_m": _canonical_history_metric(
+                history_record, "divingAverageDepth", unit="m"
+            ),
+            "average_max_depth_m": _canonical_history_metric(
+                history_record, "averageMaxDepth", unit="m"
+            ),
+            "dive_count": _canonical_history_metric(
+                history_record, "numberOfDives", unit="count"
+            ),
+            "average_diving_speed_mps": _canonical_history_metric(
+                history_record, "averageDiveSpeed", unit="m/s"
+            ),
+            "max_diving_speed_mps": _canonical_history_metric(
+                history_record, "maximumDiveSpeed", unit="m/s"
+            ),
+            "total_dive_duration_seconds": _canonical_history_millis_metric(
+                history_record, "totalDiveTimeWithMillis"
+            ),
+            "average_dive_duration_seconds": _canonical_history_millis_metric(
+                history_record, "avgDiveTimeWithMillis"
+            ),
+            "maximum_dive_duration_seconds": _canonical_history_millis_metric(
+                history_record, "maxDiveTimeWithMillis"
+            ),
+            "total_surface_recovery_seconds": _canonical_history_millis_metric(
+                history_record, "totalSurfaceTimeWithMillis"
+            ),
+            "average_surface_recovery_seconds": _canonical_history_millis_metric(
+                history_record, "avgSurfaceTimeWithMillis"
+            ),
+            "temperature_c": _canonical_history_metric(
+                history_record, "avg_temperature", unit="C"
+            ),
+        })
+    streams = {
+        "gps": gps,
+        "altitude": altitude,
+        "heart_rate": heart_rate,
+        "cadence": cadence,
+        "power": power,
+        "speed": _canonical_structural_stream(payload_for_streams, "speed"),
+        "pace": _canonical_structural_stream(payload_for_streams, "pace"),
+    }
+    if _detail_entries(payload_for_streams.get("divingDepth")) or (
+        mapping is not None and mapping["sport_family"] == "Free Diving"
+    ):
+        streams["depth"] = depth
+    if _detail_entries(payload_for_streams.get("temperature")) or (
+        mapping is not None and mapping["sport_family"] == "Free Diving"
+    ):
+        streams["temperature"] = _canonical_float_delta_stream(
+            payload_for_streams,
+            "temperature",
+            capability=capabilities["temperature"],
+            unit="C",
+        )
     return {
         "schema_version": 1,
         "identity": {
@@ -2685,15 +2888,7 @@ def canonicalize_activity(
         "time": time_model,
         "sport_capabilities": capabilities,
         "summary": summary,
-        "streams": {
-            "gps": gps,
-            "altitude": altitude,
-            "heart_rate": heart_rate,
-            "cadence": cadence,
-            "power": power,
-            "speed": _canonical_structural_stream(payload_for_streams, "speed"),
-            "pace": _canonical_structural_stream(payload_for_streams, "pace"),
-        },
+        "streams": streams,
         "laps": {
             "lap": _canonical_structural_stream(
                 payload_for_streams, "lap", capability=capabilities["laps"]
@@ -2724,7 +2919,7 @@ def canonicalize_activity(
             "present": notes_present,
             "length": len(notes_text) if notes_present else 0,
             "text": notes_text if notes_present else None,
-            "source_path": "detail.memo",
+            "source_path": notes_source_path,
             "evidence": (
                 "PRODUCTION_PROVEN"
                 if mapping_key == (130, 0)

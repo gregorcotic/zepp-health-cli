@@ -312,6 +312,47 @@ class ActivityStorageTests(unittest.TestCase):
             3,
         )
 
+    def test_free_diving_depth_and_laps_persist_without_elevation(self):
+        diving_history = history_record(
+            1786105959, native_type=196, sport_mode=0, duration=477,
+            maximumDepth=6.0493865, numberOfDives=3,
+            maximumDiveSpeed=1.7465142, avg_temperature=28.942812,
+            totalDiveTimeWithMillis=78370, avgDiveTimeWithMillis=15674,
+            maxDiveTimeWithMillis=19879, totalSurfaceTimeWithMillis=340560,
+            avgSurfaceTimeWithMillis=68112, altitude_ascend=-1,
+            altitude_descend=-1, elevationGain=-100, elevationLoss=-100,
+        )
+        diving_detail = detail_payload(
+            1786105959,
+            altitude="-2000000;-2000000;-2000000;",
+            divingDepth="0,0.0,0;1,2.5,0;1,7.5,0;",
+            lap="1,2,3;4,5,6;7,8,9;",
+            temperature="0,28.85;1,0.02;1,-0.01;",
+        )
+        self.assertEqual(self._store(diving_history, diving_detail), "inserted")
+        metrics = {
+            row["metric_name"]: (row["value_real"], row["status"])
+            for row in self.db.connection.execute(
+                "SELECT metric_name, value_real, status "
+                "FROM activity_summary_metrics WHERE activity_track_id=?",
+                ("1786105959",),
+            )
+        }
+        self.assertEqual(metrics["max_depth_m"], (6.0493865, "AVAILABLE"))
+        for name in ("elevation_gain_m", "elevation_loss_m", "ski_vertical_m"):
+            self.assertEqual(metrics[name], (None, "NOT_APPLICABLE"))
+        depth_values = [row[0] for row in self.db.connection.execute(
+            "SELECT s.value_real FROM activity_samples s "
+            "JOIN activity_streams st ON st.id=s.stream_id "
+            "WHERE st.activity_track_id=? AND st.stream_type='depth' "
+            "ORDER BY s.sample_index", ("1786105959",)
+        )]
+        self.assertEqual(depth_values, [0.0, 2.5, 10.0])
+        self.assertEqual(self.db.connection.execute(
+            "SELECT COUNT(*) FROM activity_laps WHERE activity_track_id=?",
+            ("1786105959",),
+        ).fetchone()[0], 3)
+
     def test_sync_is_incremental_zero_new_is_ok_and_changed_refreshes(self):
         record = history_record()
         stale_run = self.db.start_activity_sync(

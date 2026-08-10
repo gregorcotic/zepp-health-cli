@@ -3,6 +3,11 @@
 Status: Z001.10 normalization foundation, persisted relationally by Z001.11.
 It is not yet a coach contract.
 
+F001 adds exact Outdoor Free Diving pair `(196, 0)` as family `Free Diving`.
+Its positive depth-below-surface stream remains separate from altitude and all
+elevation/vertical fields. See
+[free_diving_activity_semantics.md](free_diving_activity_semantics.md).
+
 ## Layering
 
 The model deliberately preserves five boundaries:

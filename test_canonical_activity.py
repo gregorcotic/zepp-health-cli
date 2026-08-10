@@ -9,6 +9,72 @@ def detail(track_id: int, **fields):
 
 
 class CanonicalActivityTests(unittest.TestCase):
+    def test_outdoor_free_diving_has_positive_depth_without_elevation(self):
+        history = {
+            "trackid": 1786105959,
+            "end_time": 1786106436,
+            "type": 196,
+            "sport_mode": 0,
+            "run_time": "477",
+            "maximumDepth": 6.0493865,
+            "divingAverageDepth": 0.0,
+            "averageMaxDepth": 4.7392473,
+            "numberOfDives": 5,
+            "averageDiveSpeed": 0.4907665,
+            "maximumDiveSpeed": 1.7465142,
+            "totalDiveTimeWithMillis": 78370,
+            "avgDiveTimeWithMillis": 15674,
+            "maxDiveTimeWithMillis": 19879,
+            "totalSurfaceTimeWithMillis": 340560,
+            "avgSurfaceTimeWithMillis": 68112,
+            "avg_temperature": 28.942812,
+            "avg_heart_rate": "157.0",
+            "max_heart_rate": 168,
+            "min_heart_rate": 124,
+            "altitude_ascend": -1,
+            "altitude_descend": -1,
+            "elevationGain": -100,
+            "elevationLoss": -100,
+            "sportNotes": "fixture note",
+        }
+        lap = ",".join(str(value) for value in range(70))
+        activity = canonicalize_activity(history, {
+            "data": {
+                "trackid": 1786105959,
+                "altitude": "-2000000;-2000000;-2000000;",
+                "divingDepth": "0,0.00000,0;1,2.50000,0;1,7.50000,0;",
+                "temperature": "0,28.85000;1,0.02000;1,-0.01000;",
+                "heart_rate": "1,124;1,10;1,-2;",
+                "lap": f"{lap};{lap};{lap};",
+            }
+        })
+        self.assertEqual(activity["identity"]["sport_name"], "Outdoor Free Diving")
+        self.assertEqual(activity["identity"]["sport_family"], "Free Diving")
+        self.assertEqual(activity["summary"]["max_depth_m"]["value"], 6.0493865)
+        self.assertEqual(activity["summary"]["dive_count"]["value"], 5)
+        self.assertEqual(activity["summary"]["average_dive_duration_seconds"]["value"], 15.674)
+        self.assertEqual(activity["summary"]["average_surface_recovery_seconds"]["value"], 68.112)
+        self.assertEqual(activity["streams"]["depth"]["samples"][-1]["value"], 10.0)
+        self.assertEqual(activity["streams"]["depth"]["unit"], "m")
+        self.assertEqual(activity["streams"]["altitude"]["status"], "SENTINEL_UNAVAILABLE")
+        for name in ("elevation_gain_m", "elevation_loss_m", "ski_vertical_m"):
+            self.assertEqual(activity["summary"][name]["status"], "NOT_APPLICABLE")
+            self.assertIsNone(activity["summary"][name]["value"])
+        self.assertEqual(activity["laps"]["lap"]["sample_count"], 3)
+        self.assertEqual(len(activity["laps"]["lap"]["records"]), 3)
+        self.assertEqual(activity["notes"]["source_path"], "history.summary.sportNotes")
+
+    def test_unknown_diving_label_does_not_create_a_sport_mapping(self):
+        activity = canonicalize_activity(
+            {"trackid": 1786106000, "type": 999, "sport_mode": 0,
+             "sport_title": "Scuba Diving"},
+            {"data": {"trackid": 1786106000, "divingDepth": "0,10.0,0;"}},
+        )
+        self.assertIsNone(activity["identity"]["sport_family"])
+        self.assertEqual(activity["streams"]["depth"]["status"], "AVAILABLE")
+        self.assertEqual(activity["streams"]["depth"]["samples"][0]["value"], 10.0)
+        self.assertNotIn("altitude_m", activity["streams"]["depth"]["samples"][0])
+
     def test_hiking_normalizes_independent_gps_altitude_and_hr_streams(self):
         history = {
             "trackid": 1784948221,

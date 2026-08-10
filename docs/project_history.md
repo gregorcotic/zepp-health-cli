@@ -1,5 +1,12 @@
 # Project history
 
+## 2026-08-10 — F001 Outdoor Free Diving canonical integration
+
+Added verified `(196, 0)` identity, positive depth-below-surface facts,
+dive/surface duration and diving-speed summaries, device temperature, HR and
+lap preservation, and strict elevation separation. No migration, LMRI,
+Recovery Engine, or coaching behavior was added.
+
 ## B004 — SQLite persistence
 
 Added schema-versioned SQLite storage for native Zepp domains, sanitized raw

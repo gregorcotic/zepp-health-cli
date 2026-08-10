@@ -4,6 +4,10 @@
 Coach AI Agent. The database is not a web service and is never exposed by this
 project.
 
+F001 Free Diving uses the existing schema additively: depth and temperature
+use activity streams, factual summaries use `activity_summary_metrics`, and
+native dive/lap records use `activity_laps`. No schema version change is needed.
+
 ## Path precedence
 
 The database path is resolved in this order:

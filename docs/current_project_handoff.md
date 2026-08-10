@@ -36,6 +36,8 @@ Do not repeat broad research into:
 - native activity persistence/incremental sync
 - Ski descent semantics
 - Sport-specific canonical `ski_vertical_m` semantics
+- Outdoor Free Diving factual semantics (`type=196`, `sport_mode=0`), including
+  positive depth and strict elevation separation (F001)
 - optional-sensor absence semantics
 - known altitude sentinel handling
 - LifeLoad vs BioCharge distinction
