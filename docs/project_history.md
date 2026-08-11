@@ -706,3 +706,11 @@ no Food or Goal writes were added.
 Read-only production validation over 30 and 90 days completed successfully but
 returned zero Food entries, so live empty-state behavior is validated while
 the controlled banana capture remains the non-empty regression evidence.
+
+## Z007 — canonical Zepp Workout Notes normalization
+
+Canonical activity persistence now extracts the plain human-authored text from
+the production `detail.memo.summary` envelope. `activity_notes.note_text` no
+longer stores that serialized envelope, and a forced existing detail refresh
+repairs legacy rows without duplicates. Plain memo strings remain literal;
+unknown memo objects are not converted into note text.

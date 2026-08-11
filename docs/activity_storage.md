@@ -215,3 +215,13 @@ sudo systemctl start zepp-health-sync.timer
 The repository checkout can be returned to the previously deployed commit
 through the operator's normal release procedure. No activity migration deletes
 or rewrites health rows.
+
+## Workout Notes Canonical Text
+
+`activity_notes.note_text` stores only the plain human-authored Workout Notes,
+never a serialized Zepp API memo envelope. The current production Zepp detail
+shape uses `detail.memo.summary`; it is trimmed and persisted with
+`source_path=detail.memo.summary`. A non-empty plain `detail.memo` string stays
+literal. Unsupported memo objects remain absent rather than being serialized
+into `note_text`; existing `history.summary.sportNotes` fallback behavior is
+unchanged.

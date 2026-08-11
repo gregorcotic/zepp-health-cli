@@ -493,6 +493,61 @@ class ActivityStorageTests(unittest.TestCase):
             "Revised",
         )
 
+    def test_refresh_repairs_legacy_serialized_memo_without_duplicates(self):
+        record = history_record(native_type=130)
+        note = (
+            "BACK SQUAT\n5x5\n\nBulgarian Split Squat\n4x8 / leg\n\n"
+            "BENCH PRESS\n5x5"
+        )
+        legacy_memo = json.dumps({
+            "summary": note,
+            "groupMemos": [],
+            "onlyUpdateSummary": False,
+        })
+        detail = detail_payload(memo=legacy_memo)
+        legacy = canonicalize_activity(record, detail, timezone_name="Europe/Ljubljana")
+        legacy["notes"] = {
+            "present": True,
+            "text": legacy_memo,
+            "length": len(legacy_memo),
+            "source_path": "detail.memo",
+            "evidence": legacy["notes"]["evidence"],
+        }
+        self.assertEqual(self.db.store_canonical_activity(legacy, record, detail), "inserted")
+        before_counts = {
+            table: self.db.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in ("activities", "activity_notes", "activity_summary_metrics", "activity_streams")
+        }
+        client = FakeActivityClient([record], {str(record["trackid"]): detail})
+
+        repaired = sync_native_activities(
+            client,
+            self.db,
+            "2023-11-14",
+            "2023-11-14",
+            refresh_details=True,
+        )
+        self.assertEqual(repaired["updated"], 1)
+        repaired_note = self.db.connection.execute(
+            "SELECT present, note_text, note_length, source_path FROM activity_notes"
+        ).fetchone()
+        self.assertEqual(tuple(repaired_note), (1, note, len(note), "detail.memo.summary"))
+        after_counts = {
+            table: self.db.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in before_counts
+        }
+        self.assertEqual(after_counts, before_counts)
+
+        replay = sync_native_activities(
+            client,
+            self.db,
+            "2023-11-14",
+            "2023-11-14",
+            refresh_details=True,
+        )
+        self.assertEqual(replay["unchanged"], 1)
+        self.assertEqual(replay["updated"], 0)
+
     def test_partial_detail_failure_and_identity_mismatch_preserve_valid_rows(self):
         good = history_record()
         failed = history_record(1700000500)

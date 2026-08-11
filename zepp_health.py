@@ -2021,6 +2021,34 @@ def _canonical_detail_payload(detail_response: Any) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def _canonical_memo_text(memo: Any) -> tuple[str | None, str | None]:
+    """Return the supported human-authored Workout Notes text and provenance."""
+    if isinstance(memo, dict):
+        summary = memo.get("summary")
+        if isinstance(summary, str) and summary.strip():
+            return summary.strip(), "detail.memo.summary"
+        return None, None
+    if not isinstance(memo, str) or not memo.strip():
+        return None, None
+
+    # Production detail.memo is a JSON-encoded Zepp envelope. Require its
+    # observed envelope fields so ordinary JSON-like user text stays literal.
+    try:
+        decoded = json.loads(memo)
+    except json.JSONDecodeError:
+        return memo, "detail.memo"
+    if (
+        isinstance(decoded, dict)
+        and "groupMemos" in decoded
+        and "onlyUpdateSummary" in decoded
+    ):
+        summary = decoded.get("summary")
+        if isinstance(summary, str) and summary.strip():
+            return summary.strip(), "detail.memo.summary"
+        return None, None
+    return memo, "detail.memo"
+
+
 def _canonical_sport_capabilities(
     mapping: dict[str, Any] | None,
 ) -> dict[str, str]:
@@ -2650,12 +2678,10 @@ def canonicalize_activity(
 
     detail_note = payload_for_streams.get("memo")
     history_note = history_record.get("sportNotes")
-    notes_text = detail_note if isinstance(detail_note, str) and detail_note else history_note
-    notes_source_path = (
-        "detail.memo"
-        if isinstance(detail_note, str) and detail_note
-        else "history.summary.sportNotes"
-    )
+    notes_text, notes_source_path = _canonical_memo_text(detail_note)
+    if notes_text is None and isinstance(history_note, str) and history_note.strip():
+        notes_text = history_note
+        notes_source_path = "history.summary.sportNotes"
     notes_present = isinstance(notes_text, str) and bool(notes_text)
     if notes_present:
         quality_flags.append("WORKOUT_NOTES_AVAILABLE")

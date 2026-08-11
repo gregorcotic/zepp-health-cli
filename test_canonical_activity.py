@@ -9,6 +9,44 @@ def detail(track_id: int, **fields):
 
 
 class CanonicalActivityTests(unittest.TestCase):
+    def test_memo_summary_object_persists_plain_workout_text(self):
+        note = "BACK SQUAT\n5x5\n\nBENCH PRESS\n5x5"
+        activity = canonicalize_activity(
+            {"trackid": 99, "type": 130, "sport_mode": 0, "run_time": 600},
+            detail(99, memo={"summary": f"  {note}  "}),
+        )
+        self.assertEqual(activity["notes"]["text"], note)
+        self.assertTrue(activity["notes"]["present"])
+        self.assertEqual(activity["notes"]["length"], len(note))
+        self.assertEqual(activity["notes"]["source_path"], "detail.memo.summary")
+
+    def test_plain_string_memo_and_json_like_text_remain_literal(self):
+        plain = canonicalize_activity(
+            {"trackid": 98, "type": 130, "sport_mode": 0, "run_time": 600},
+            detail(98, memo="BENCH PRESS 5x5"),
+        )
+        json_like = canonicalize_activity(
+            {"trackid": 97, "type": 130, "sport_mode": 0, "run_time": 600},
+            detail(97, memo='{"summary": "human-authored JSON-like text"}'),
+        )
+        self.assertEqual(plain["notes"]["text"], "BENCH PRESS 5x5")
+        self.assertEqual(plain["notes"]["source_path"], "detail.memo")
+        self.assertEqual(
+            json_like["notes"]["text"],
+            '{"summary": "human-authored JSON-like text"}',
+        )
+
+    def test_empty_or_unknown_memo_object_does_not_become_note_text(self):
+        for track_id, memo in ((96, {"summary": "   "}), (95, {"foo": "bar"})):
+            activity = canonicalize_activity(
+                {"trackid": track_id, "type": 130, "sport_mode": 0, "run_time": 600},
+                detail(track_id, memo=memo),
+            )
+            self.assertFalse(activity["notes"]["present"])
+            self.assertIsNone(activity["notes"]["text"])
+            self.assertEqual(activity["notes"]["length"], 0)
+            self.assertIsNone(activity["notes"]["source_path"])
+
     def test_outdoor_free_diving_has_positive_depth_without_elevation(self):
         history = {
             "trackid": 1786105959,
