@@ -90,6 +90,16 @@ Each run records attempted/successful time, requested dates, counts, detail
 fetch outcomes, cursor, and sanitized failure categories. Activity freshness
 is independent of health freshness.
 
+## Scheduled Incremental Sync
+
+`scripts/zepp-health-sync`, invoked by the existing
+`zepp-health-sync.timer`, runs the bounded `sync-activities` command after
+the daily-metric sync under the same advisory lock. It uses
+`ZEPP_ACTIVITY_SYNC_DAYS` when explicitly configured, otherwise the existing
+`ZEPP_SYNC_DAYS` window. This is the only scheduled canonical activity path;
+no parallel activity timer is required. A nonzero result from either command
+prevents the existing `OnSuccess` context-generation trigger.
+
 ## Commands and queries
 
 ```bash

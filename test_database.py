@@ -799,6 +799,16 @@ class DatabaseTests(unittest.TestCase):
         self.assertIn("zepp-health-sync skipped: lock held", wrapper_text)
         self.assertIn("exit 75", wrapper_text)
 
+    def test_sync_wrapper_runs_canonical_activity_sync(self):
+        wrapper_text = Path("scripts/zepp-health-sync").read_text()
+        self.assertIn(
+            'ACTIVITY_DAYS=${ZEPP_ACTIVITY_SYNC_DAYS:-$DAYS}', wrapper_text
+        )
+        self.assertIn(
+            'sync-activities --days "$ACTIVITY_DAYS" --db "$DATABASE"',
+            wrapper_text,
+        )
+
 
 
     def test_stress_persistence_v7(self) -> None:

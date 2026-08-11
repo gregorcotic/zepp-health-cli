@@ -43,9 +43,15 @@ python3 zepp_health.py db-restore --input /opt/zepp-health-cli/backups/zepp_heal
 The repository contract is `zepp-health-sync.service`,
 `zepp-health-sync.timer`, command
 `/opt/zepp-health-cli/scripts/zepp-health-sync`, and working directory
-`/opt/zepp-health-cli`. The shipped service has no `EnvironmentFile` and uses
-installation placeholders for its user/group. The exact live Ubuntu account
-and overrides are not recorded here. Before C019, the repository timer used
+`/opt/zepp-health-cli`. The locked wrapper synchronizes both native daily
+metrics (`sync-db`) and canonical activity history/detail records
+(`sync-activities`) in that order. Activity synchronization uses
+`ZEPP_ACTIVITY_SYNC_DAYS` when set, otherwise the same bounded
+`ZEPP_SYNC_DAYS` window. The single timer remains the only scheduler; a
+successful context-generation trigger therefore requires both commands to
+succeed. The shipped service has no `EnvironmentFile` and uses installation
+placeholders for its user/group. The exact live Ubuntu account and overrides
+are not recorded here. Before C019, the repository timer used
 `OnCalendar=*-*-* 00/6:00:00` (00:00, 06:00, 12:00, and 18:00 in the system
 timezone). Discover the live contract before deployment:
 

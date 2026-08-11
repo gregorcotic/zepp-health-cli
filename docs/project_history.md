@@ -420,6 +420,15 @@ Safe status and inspection commands omit coordinates, raw samples, native
 source values, and Notes text by default. Existing health tables and freshness
 semantics remain unchanged. C017 remains paused.
 
+## Z006 — canonical activity sync scheduling
+
+Production review found that the existing Zepp timer executed only `sync-db`,
+leaving the already-implemented bounded `sync-activities` path unscheduled.
+The existing locked wrapper now runs both commands under the same timer and
+bounded window, so canonical activities, Workout Notes, and their factual
+metrics remain current without a parallel scheduler. A nonzero activity result
+keeps the existing context-generation `OnSuccess` boundary conservative.
+
 ## Z002 — Legacy ZeppAiAgent audit and evidence registry
 
 A structured audit of the earlier `ZeppAiAgent` research project was performed

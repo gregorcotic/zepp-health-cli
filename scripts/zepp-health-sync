@@ -6,6 +6,7 @@ PYTHON=${ZEPP_PYTHON:-$PROJECT_DIR/.venv/bin/python}
 DATABASE=${ZEPP_DB_PATH:-$PROJECT_DIR/data/zepp_health.db}
 LOCK_PATH=${ZEPP_SYNC_LOCK:-$PROJECT_DIR/run/zepp-health-sync.lock}
 DAYS=${ZEPP_SYNC_DAYS:-7}
+ACTIVITY_DAYS=${ZEPP_ACTIVITY_SYNC_DAYS:-$DAYS}
 
 if ! command -v flock >/dev/null 2>&1; then
     echo "zepp-health-sync failed: flock is required" >&2
@@ -23,8 +24,14 @@ started=$(date +%s)
 echo "zepp-health-sync started database=$DATABASE days=$DAYS"
 set +e
 "$PYTHON" "$PROJECT_DIR/zepp_health.py" sync-db --days "$DAYS" --db "$DATABASE"
-status=$?
+health_status=$?
+"$PYTHON" "$PROJECT_DIR/zepp_health.py" sync-activities --days "$ACTIVITY_DAYS" --db "$DATABASE"
+activity_status=$?
 set -e
 finished=$(date +%s)
-echo "zepp-health-sync finished status=$status duration_seconds=$((finished - started)) database=$DATABASE"
-exit "$status"
+echo "zepp-health-sync finished health_status=$health_status activity_status=$activity_status duration_seconds=$((finished - started)) database=$DATABASE"
+
+if [ "$health_status" -ne 0 ]; then
+    exit "$health_status"
+fi
+exit "$activity_status"
