@@ -1,14 +1,22 @@
 import copy
 import json
 import sqlite3
+import sys
 import tempfile
 import unittest
+from datetime import date
 from pathlib import Path
+from unittest.mock import patch
 
 import requests
 
 from zepp_db import Database, SCHEMA_VERSION
-from zepp_health import canonicalize_activity, sync_native_activities
+from zepp_health import (
+    _activity_sync_dates,
+    canonicalize_activity,
+    main,
+    sync_native_activities,
+)
 
 
 def history_record(
@@ -98,6 +106,66 @@ class ActivityStorageTests(unittest.TestCase):
             history, detail, timezone_name="Europe/Ljubljana"
         )
         return self.db.store_canonical_activity(canonical, history, detail)
+
+    def _parse_activity_sync_args(self, *arguments):
+        captured = {}
+
+        def capture(args):
+            captured["args"] = args
+
+        with (
+            patch("zepp_health.cmd_sync_activities", side_effect=capture),
+            patch.object(sys, "argv", ["zepp_health.py", "sync-activities", *arguments]),
+        ):
+            main()
+        return captured["args"]
+
+    def test_activity_sync_cli_date_modes_distinguish_default_days(self):
+        default_args = self._parse_activity_sync_args()
+        self.assertIsNone(default_args.days)
+        default_from, default_to = _activity_sync_dates(default_args)
+        self.assertEqual(
+            (date.fromisoformat(default_to) - date.fromisoformat(default_from)).days,
+            6,
+        )
+
+        rolling_args = self._parse_activity_sync_args("--days", "14")
+        self.assertEqual(rolling_args.days, 14)
+        rolling_from, rolling_to = _activity_sync_dates(rolling_args)
+        self.assertEqual(
+            (date.fromisoformat(rolling_to) - date.fromisoformat(rolling_from)).days,
+            13,
+        )
+
+        explicit_args = self._parse_activity_sync_args(
+            "--from-date", "2026-07-26", "--to-date", "2026-08-11"
+        )
+        self.assertIsNone(explicit_args.days)
+        self.assertEqual(
+            _activity_sync_dates(explicit_args),
+            ("2026-07-26", "2026-08-11"),
+        )
+
+    def test_activity_sync_cli_rejects_conflicting_or_incomplete_ranges(self):
+        mixed_args = self._parse_activity_sync_args(
+            "--days", "7", "--from-date", "2026-07-26", "--to-date", "2026-08-11"
+        )
+        with self.assertRaisesRegex(ValueError, "--days cannot be combined"):
+            _activity_sync_dates(mixed_args)
+
+        for arguments in (
+            ("--from-date", "2026-07-26"),
+            ("--to-date", "2026-08-11"),
+        ):
+            with self.subTest(arguments=arguments):
+                with self.assertRaisesRegex(ValueError, "provided together"):
+                    _activity_sync_dates(self._parse_activity_sync_args(*arguments))
+
+        invalid_range_args = self._parse_activity_sync_args(
+            "--from-date", "2026-08-11", "--to-date", "2026-07-26"
+        )
+        with self.assertRaisesRegex(ValueError, "must not be before"):
+            _activity_sync_dates(invalid_range_args)
 
     def test_insert_repeated_unchanged_and_relational_children(self):
         self.assertEqual(self._store(), "inserted")

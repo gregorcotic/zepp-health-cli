@@ -7514,7 +7514,9 @@ def main() -> None:
     args = p.parse_args()
     global _CONFIG_PATH_OVERRIDE
     _CONFIG_PATH_OVERRIDE = args.config
-    if getattr(args, "days", None) is None:
+    # sync-activities distinguishes an omitted --days from an explicit value
+    # so its date-range validation can allow --from-date/--to-date.
+    if getattr(args, "days", None) is None and args.cmd != "sync-activities":
         args.days = 14
     if args.cmd == "config" and not (args.show or args.path):
         args.show = True
